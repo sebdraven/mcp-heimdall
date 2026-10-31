@@ -1,0 +1,40 @@
+name: zizmor
+
+# Static analysis of the workflows themselves. A pipeline is an execution
+# environment with a token and a package registry attached, so it gets the same
+# scrutiny as the code it builds.
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/**']
+  pull_request:
+    paths: ['.github/workflows/**']
+  # Weekly: new rules land after the last push, and a workflow that was clean
+  # in March is not clean by definition in September.
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zizmor-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: zizmorcore/zizmor-action@3dc1ecc9bcb9e94e9b2c709687979e1298497054 # v0.6.2
+        with:
+          # SARIF upload needs GitHub Advanced Security; without it the job
+          # fails on the upload rather than on real findings.
+          advanced-security: false
