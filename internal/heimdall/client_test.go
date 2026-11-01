@@ -183,6 +183,42 @@ func TestDecodePivotsEmpty(t *testing.T) {
 	}
 }
 
+func TestDecodePivotsNSPairs(t *testing.T) {
+	res, err := DecodePivots([]byte(`{"pivots":[],"excluded_cdn":[],"ns_pairs":{"zone":"a.example","ns":["ana.ns.cloudflare.com","bob.ns.cloudflare.com"],"matches":[` +
+		`{"domain":"same.example","other":{"first":"2026-03-01T13:00:00Z","last":"2026-03-01T15:00:00Z"},"target":{"first":"2026-03-01T12:00:00Z","last":"2026-03-01T14:00:00Z"},"overlap":{"first":"2026-03-01T13:00:00Z","last":"2026-03-01T14:00:00Z"}},` +
+		`{"domain":"later.example","other":{"first":"2026-03-01T17:00:00Z","last":"2026-03-01T18:00:00Z"},"target":{"first":"2026-03-01T12:00:00Z","last":"2026-03-01T14:00:00Z"},"overlap":null}]}}`))
+	if err != nil {
+		t.Fatalf("DecodePivots: %v", err)
+	}
+	p := res.NSPairs
+	if p == nil || p.Zone != "a.example" || strings.Join(p.NS, " ") != "ana.ns.cloudflare.com bob.ns.cloudflare.com" || len(p.Matches) != 2 {
+		t.Fatalf("ns_pairs = %+v", p)
+	}
+	if m := p.Matches[0]; m.Domain != "same.example" || m.Other.First != "2026-03-01T13:00:00Z" || m.Target.Last != "2026-03-01T14:00:00Z" ||
+		m.Overlap == nil || m.Overlap.First != "2026-03-01T13:00:00Z" || m.Overlap.Last != "2026-03-01T14:00:00Z" {
+		t.Errorf("match 0 = %+v", m)
+	}
+	if m := p.Matches[1]; m.Domain != "later.example" || m.Overlap != nil {
+		t.Errorf("match 1 = %+v, want no overlap", m)
+	}
+
+	res, err = DecodePivots([]byte(`{"pivots":[],"excluded_cdn":[],"ns_pairs":{"zone":"a.example","ns":["ana.ns.cloudflare.com","bob.ns.cloudflare.com"],"matches":[]}}`))
+	if err != nil || res.NSPairs == nil || res.NSPairs.Matches == nil || len(res.NSPairs.Matches) != 0 {
+		t.Errorf("no match: %+v, %v; want an empty, non-nil list", res.NSPairs, err)
+	}
+
+	for _, body := range []string{`{"pivots":[],"excluded_cdn":[],"ns_pairs":null}`, `{"pivots":[],"excluded_cdn":[]}`, "[" + pivotJSON + "]"} {
+		res, err := DecodePivots([]byte(body))
+		if err != nil || res.NSPairs != nil {
+			t.Errorf("%s: ns_pairs = %+v, %v; want nil", body, res.NSPairs, err)
+		}
+		b, _ := json.Marshal(res)
+		if !strings.Contains(string(b), `"ns_pairs":null`) {
+			t.Errorf("%s: re-encoded as %s, want ns_pairs null", body, b)
+		}
+	}
+}
+
 func TestDomainDetailScopeAndCDN(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"domain":null,` +

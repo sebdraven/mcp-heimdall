@@ -25,7 +25,7 @@ and change domains.
 | `hd_pdns_query` | which records a name owns — rrtype, rdata, first and last seen, count |
 | `hd_pdns_rdata` | which names held a value — IP, target name, MX/TXT/SOA text |
 | `hd_domain` | everything the domain page shows: watchlist entry, current state, change timeline, passive DNS; each change has a `scope`, current entries flag CDN addresses in `cdn` |
-| `hd_pivots` | which other names shared an A, AAAA or NS value, and when the periods overlapped; CDN addresses are listed in `excluded_cdn` instead |
+| `hd_pivots` | which other names shared an A or AAAA value (CDN addresses listed in `excluded_cdn` instead) or exactly the same NS set, and when the periods overlapped |
 | `hd_events` | what changed — new or removed values, NXDOMAIN, resurrection, sinkhole or parking NS, SOA serial, TTL |
 | `hd_campaigns` | the campaigns and how many domains each watches |
 | `hd_campaign_domains` | the domains of one campaign, by id or exact name |
@@ -45,10 +45,20 @@ own records; `"scope": "name"` is the name itself. A `current` entry whose
 `rdata` holds CDN addresses carries `"cdn": {"<ip>": "<provider>"}`, absent
 otherwise.
 
-`hd_pivots` returns `pivots` and `excluded_cdn`: the A and AAAA values of the
-name that fall in Heimdall's CDN prefixes are not pivoted on and are listed as
-`{"value", "provider"}`. Against a Heimdall that predates this list,
-`excluded_cdn` is empty.
+`hd_pivots` returns `pivots`, `excluded_cdn` and `ns_pairs`:
+
+- `pivots` are the names that shared one of the name's A or AAAA values. The
+  values that fall in Heimdall's CDN prefixes are not pivoted on and are
+  listed in `excluded_cdn` as `{"value", "provider"}`.
+- `ns_pairs` is `{"zone", "ns", "matches"}`: the zone of the name (itself, or
+  its nearest ancestor owning NS records seen in the last 7 days), its sorted
+  NS set, and the other names whose current NS set is strictly identical. A
+  single nameserver says nothing, but providers such as Cloudflare give each
+  account its own pair, so an identical set is a strong sign of one operator.
+  CDN prefixes do not apply. `ns_pairs` is `null` when no zone is found or
+  its set has fewer than 2 nameservers.
+
+Against an older Heimdall, `excluded_cdn` is empty and `ns_pairs` is `null`.
 
 ## Configuration
 
@@ -102,7 +112,7 @@ hdctl set-domain -enabled=false www.example.com
 hdctl set-domain -campaign '' www.example.com
 ```
 
-`pivots` prints the CDN exclusions in `excluded_cdn` next to `pivots`.
+`pivots` prints `excluded_cdn` and `ns_pairs` next to `pivots`.
 `add-domains` reads `-f` one domain per line, `#` starting a comment, `-` for
 stdin, and defaults to a 43200-second (12-hour) interval. It exits 1 if any
 domain failed.
@@ -112,8 +122,8 @@ domain failed.
 - **rrname** is the owner of a record, not the name that was queried. An A
   query for `www.x` answered through a CNAME to `cdn.y` yields two records,
   `(www.x, CNAME, cdn.y)` and `(cdn.y, A, <ip>)`: reaching a watched name's IPs
-  means following its CNAME targets, and `hd_pivots` only sees values owned by
-  the name itself.
+  means following its CNAME targets, and the A/AAAA pivots of `hd_pivots` only
+  see values owned by the name itself.
 - **rdata** is the value of a record: an IP, a target name, or MX, TXT or SOA
   text.
 - **tracked set** is what Heimdall retains for one (domain, qtype, resolver)

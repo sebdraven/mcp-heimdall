@@ -175,8 +175,10 @@ func TestForbiddenStopsWrites(t *testing.T) {
 
 func TestPivotsExcludedCDN(t *testing.T) {
 	for body, want := range map[string]string{
-		`[]`: `"returned":0,"pivots":[],"excluded_cdn":[]`,
-		`{"pivots":[],"excluded_cdn":[{"value":"104.16.0.1","provider":"Cloudflare"}]}`: `"returned":0,"pivots":[],"excluded_cdn":[{"value":"104.16.0.1","provider":"Cloudflare"}]`,
+		`[]`: `"returned":0,"pivots":[],"excluded_cdn":[],"ns_pairs":null`,
+		`{"pivots":[],"excluded_cdn":[{"value":"104.16.0.1","provider":"Cloudflare"}]}`: `"returned":0,"pivots":[],"excluded_cdn":[{"value":"104.16.0.1","provider":"Cloudflare"}],"ns_pairs":null`,
+		`{"pivots":[],"excluded_cdn":[],"ns_pairs":null}`: `"excluded_cdn":[],"ns_pairs":null`,
+		`{"pivots":[],"excluded_cdn":[],"ns_pairs":{"zone":"a.example","ns":["ana.ns.cloudflare.com","bob.ns.cloudflare.com"],"matches":[{"domain":"same.example","other":{"first":"2026-03-01T13:00:00Z","last":"2026-03-01T15:00:00Z"},"target":{"first":"2026-03-01T12:00:00Z","last":"2026-03-01T14:00:00Z"},"overlap":null}]}}`: `"ns_pairs":{"zone":"a.example","ns":["ana.ns.cloudflare.com","bob.ns.cloudflare.com"],"matches":[{"domain":"same.example","other":{"first":"2026-03-01T13:00:00Z","last":"2026-03-01T15:00:00Z"},"target":{"first":"2026-03-01T12:00:00Z","last":"2026-03-01T14:00:00Z"},"overlap":null}]}`,
 	} {
 		s, _ := stub(t, func(w http.ResponseWriter, r *http.Request) {
 			w.Write([]byte(body))

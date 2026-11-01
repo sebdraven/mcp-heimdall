@@ -56,6 +56,7 @@ type PivotsResult struct {
 	Returned    int                    `json:"returned"`
 	Pivots      []heimdall.Pivot       `json:"pivots"`
 	ExcludedCDN []heimdall.ExcludedCDN `json:"excluded_cdn"`
+	NSPairs     *heimdall.NSPairs      `json:"ns_pairs"`
 	Note        string                 `json:"note,omitempty"`
 }
 
@@ -158,6 +159,7 @@ func (s *Service) Pivots(ctx context.Context, fqdn string, limit int) (PivotsRes
 		Returned:    len(ps.Pivots),
 		Pivots:      ps.Pivots,
 		ExcludedCDN: ps.ExcludedCDN,
+		NSPairs:     ps.NSPairs,
 		Note:        fullPage(len(ps.Pivots), limit, pivotsLimit),
 	}, nil
 }
