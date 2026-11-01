@@ -174,23 +174,35 @@ func TestForbiddenStopsWrites(t *testing.T) {
 }
 
 func TestPivotsExcludedCDN(t *testing.T) {
-	for body, want := range map[string]string{
-		`[]`: `"returned":0,"pivots":[],"excluded_cdn":[],"ns_pairs":null`,
-		`{"pivots":[],"excluded_cdn":[{"value":"104.16.0.1","provider":"Cloudflare"}]}`: `"returned":0,"pivots":[],"excluded_cdn":[{"value":"104.16.0.1","provider":"Cloudflare"}],"ns_pairs":null`,
-		`{"pivots":[],"excluded_cdn":[],"ns_pairs":null}`: `"excluded_cdn":[],"ns_pairs":null`,
-		`{"pivots":[],"excluded_cdn":[],"ns_pairs":{"zone":"a.example","ns":["ana.ns.cloudflare.com","bob.ns.cloudflare.com"],"matches":[{"domain":"same.example","other":{"first":"2026-03-01T13:00:00Z","last":"2026-03-01T15:00:00Z"},"target":{"first":"2026-03-01T12:00:00Z","last":"2026-03-01T14:00:00Z"},"overlap":null}]}}`: `"ns_pairs":{"zone":"a.example","ns":["ana.ns.cloudflare.com","bob.ns.cloudflare.com"],"matches":[{"domain":"same.example","other":{"first":"2026-03-01T13:00:00Z","last":"2026-03-01T15:00:00Z"},"target":{"first":"2026-03-01T12:00:00Z","last":"2026-03-01T14:00:00Z"},"overlap":null}]}`,
+	for _, tc := range []struct{ body, want string }{
+		{
+			body: `[]`,
+			want: `"returned":0,"pivots":[],"excluded_cdn":[],"ns_pairs":null`,
+		},
+		{
+			body: `{"pivots":[],"excluded_cdn":[{"value":"104.16.0.1","provider":"Cloudflare"}]}`,
+			want: `"returned":0,"pivots":[],"excluded_cdn":[{"value":"104.16.0.1","provider":"Cloudflare"}],"ns_pairs":null`,
+		},
+		{
+			body: `{"pivots":[],"excluded_cdn":[],"ns_pairs":null}`,
+			want: `"excluded_cdn":[],"ns_pairs":null`,
+		},
+		{
+			body: `{"pivots":[],"excluded_cdn":[],"ns_pairs":{"zone":"a.example","ns":["ana.ns.cloudflare.com","bob.ns.cloudflare.com"],"matches":[{"domain":"same.example","other":{"first":"2026-03-01T13:00:00Z","last":"2026-03-01T15:00:00Z"},"target":{"first":"2026-03-01T12:00:00Z","last":"2026-03-01T14:00:00Z"},"overlap":null}]}}`,
+			want: `"ns_pairs":{"zone":"a.example","ns":["ana.ns.cloudflare.com","bob.ns.cloudflare.com"],"matches":[{"domain":"same.example","other":{"first":"2026-03-01T13:00:00Z","last":"2026-03-01T15:00:00Z"},"target":{"first":"2026-03-01T12:00:00Z","last":"2026-03-01T14:00:00Z"},"overlap":null}]}`,
+		},
 	} {
 		s, _ := stub(t, func(w http.ResponseWriter, r *http.Request) {
-			w.Write([]byte(body))
+			w.Write([]byte(tc.body))
 		})
 		res, err := s.Pivots(context.Background(), "www.x.example", 0)
 		if err != nil {
-			t.Errorf("%s: %v", body, err)
+			t.Errorf("%s: %v", tc.body, err)
 			continue
 		}
 		b, _ := json.Marshal(res)
-		if !strings.Contains(string(b), want) {
-			t.Errorf("%s: result %s lacks %s", body, b, want)
+		if !strings.Contains(string(b), tc.want) {
+			t.Errorf("%s: result %s lacks %s", tc.body, b, tc.want)
 		}
 	}
 }
