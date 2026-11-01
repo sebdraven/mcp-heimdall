@@ -173,6 +173,26 @@ func TestForbiddenStopsWrites(t *testing.T) {
 	}
 }
 
+func TestPivotsExcludedCDN(t *testing.T) {
+	for body, want := range map[string]string{
+		`[]`: `"returned":0,"pivots":[],"excluded_cdn":[]`,
+		`{"pivots":[],"excluded_cdn":[{"value":"104.16.0.1","provider":"Cloudflare"}]}`: `"returned":0,"pivots":[],"excluded_cdn":[{"value":"104.16.0.1","provider":"Cloudflare"}]`,
+	} {
+		s, _ := stub(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(body))
+		})
+		res, err := s.Pivots(context.Background(), "www.x.example", 0)
+		if err != nil {
+			t.Errorf("%s: %v", body, err)
+			continue
+		}
+		b, _ := json.Marshal(res)
+		if !strings.Contains(string(b), want) {
+			t.Errorf("%s: result %s lacks %s", body, b, want)
+		}
+	}
+}
+
 func TestDomainsFilter(t *testing.T) {
 	s, _ := stub(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`[{"fqdn":"a.example","enabled":true},{"fqdn":"b.example","enabled":false}]`))

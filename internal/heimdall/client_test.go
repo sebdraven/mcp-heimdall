@@ -123,6 +123,93 @@ func TestEventDetailKeepsDigits(t *testing.T) {
 	}
 }
 
+const pivotJSON = `{"domain":"b.example","rrtype":"A","rdata":"192.0.2.1","target":{"first":"2026-03-01T12:00:00Z","last":"2026-03-02T12:00:00Z"},"other":{"first":"2026-03-02T00:00:00Z","last":"2026-03-03T00:00:00Z"},"overlap":{"first":"2026-03-02T00:00:00Z","last":"2026-03-02T12:00:00Z"}}`
+
+func TestPivotsBothFormats(t *testing.T) {
+	for name, tt := range map[string]struct {
+		body     string
+		excluded []ExcludedCDN
+	}{
+		"array":       {body: "[" + pivotJSON + "]", excluded: []ExcludedCDN{}},
+		"array space": {body: "\n  [" + pivotJSON + "]", excluded: []ExcludedCDN{}},
+		"object": {
+			body:     `{"pivots":[` + pivotJSON + `],"excluded_cdn":[{"value":"104.16.0.1","provider":"Cloudflare"},{"value":"2606:4700::1","provider":"Cloudflare"}]}`,
+			excluded: []ExcludedCDN{{Value: "104.16.0.1", Provider: "Cloudflare"}, {Value: "2606:4700::1", Provider: "Cloudflare"}},
+		},
+		"object without exclusions": {body: `{"pivots":[` + pivotJSON + `],"excluded_cdn":[]}`, excluded: []ExcludedCDN{}},
+	} {
+		var gotPath string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotPath = r.URL.Path
+			w.Write([]byte(tt.body))
+		}))
+		res, err := New(srv.URL, "TOK").Pivots(context.Background(), "www.x.example", 0)
+		srv.Close()
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
+			continue
+		}
+		if gotPath != "/api/pivots/www.x.example" {
+			t.Errorf("%s: path %q", name, gotPath)
+		}
+		if len(res.Pivots) != 1 {
+			t.Errorf("%s: %d pivots, want 1", name, len(res.Pivots))
+			continue
+		}
+		if p := res.Pivots[0]; p.Domain != "b.example" || p.RData != "192.0.2.1" || p.Overlap == nil || p.Overlap.Last != "2026-03-02T12:00:00Z" {
+			t.Errorf("%s: pivot = %+v", name, p)
+		}
+		if res.ExcludedCDN == nil || len(res.ExcludedCDN) != len(tt.excluded) {
+			t.Errorf("%s: excluded = %#v, want %v", name, res.ExcludedCDN, tt.excluded)
+			continue
+		}
+		for i := range tt.excluded {
+			if res.ExcludedCDN[i] != tt.excluded[i] {
+				t.Errorf("%s: excluded[%d] = %+v, want %+v", name, i, res.ExcludedCDN[i], tt.excluded[i])
+			}
+		}
+	}
+}
+
+func TestDecodePivotsEmpty(t *testing.T) {
+	for _, body := range []string{`[]`, `{"pivots":[],"excluded_cdn":[]}`, `{}`} {
+		res, err := DecodePivots([]byte(body))
+		if err != nil || res.Pivots == nil || len(res.Pivots) != 0 || res.ExcludedCDN == nil || len(res.ExcludedCDN) != 0 {
+			t.Errorf("%s: %#v, %v; want empty, non-nil lists", body, res, err)
+		}
+	}
+	if _, err := DecodePivots([]byte(`[{"domain":1}]`)); err == nil {
+		t.Error("a malformed array was accepted")
+	}
+}
+
+func TestDomainDetailScopeAndCDN(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"domain":null,` +
+			`"current":[{"qtype":"A","resolver":"9.9.9.9:53","ts":"2026-03-01T12:00:00Z","rcode":"NOERROR","ttl":60,"rdata":["104.16.0.1","192.0.2.9"],"cdn":{"104.16.0.1":"Cloudflare"}},` +
+			`{"qtype":"AAAA","resolver":"9.9.9.9:53","ts":"2026-03-01T12:00:00Z","rcode":"NOERROR","ttl":0,"rdata":[]}],` +
+			`"changes":[{"ts":"2026-03-01T12:01:00Z","scope":"zone","qtype":"NS","resolver":"9.9.9.9:53","prev_rcode":"NOERROR","new_rcode":"NOERROR","added":["ns1.sinkhole.example"],"removed":["ns1.x.example"],"prev_ttl":3600,"new_ttl":3600},` +
+			`{"ts":"2026-03-01T12:00:00Z","scope":"name","qtype":"A","resolver":"9.9.9.9:53","prev_rcode":"NXDOMAIN","new_rcode":"NOERROR","added":["192.0.2.1"],"removed":[],"prev_ttl":0,"new_ttl":300}],` +
+			`"pdns":[]}`))
+	}))
+	defer srv.Close()
+
+	d, err := New(srv.URL, "TOK").DomainDetail(context.Background(), "www.x.example", 0)
+	if err != nil {
+		t.Fatalf("DomainDetail: %v", err)
+	}
+	if len(d.Changes) != 2 || d.Changes[0].Scope != "zone" || d.Changes[1].Scope != "name" {
+		t.Errorf("changes = %+v, want scopes zone then name", d.Changes)
+	}
+	if len(d.Current) != 2 || d.Current[0].CDN["104.16.0.1"] != "Cloudflare" || len(d.Current[0].CDN) != 1 || d.Current[1].CDN != nil {
+		t.Errorf("current = %+v", d.Current)
+	}
+	b, _ := json.Marshal(d.Current[1])
+	if strings.Contains(string(b), "cdn") {
+		t.Errorf("empty cdn re-encoded: %s", b)
+	}
+}
+
 func TestNoTokenIsAnError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("the server was called without a token")

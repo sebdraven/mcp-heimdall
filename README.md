@@ -24,8 +24,8 @@ and change domains.
 |---|---|
 | `hd_pdns_query` | which records a name owns — rrtype, rdata, first and last seen, count |
 | `hd_pdns_rdata` | which names held a value — IP, target name, MX/TXT/SOA text |
-| `hd_domain` | everything the domain page shows: watchlist entry, current state, change timeline, passive DNS |
-| `hd_pivots` | which other names shared an A, AAAA or NS value, and when the periods overlapped |
+| `hd_domain` | everything the domain page shows: watchlist entry, current state, change timeline, passive DNS; each change has a `scope`, current entries flag CDN addresses in `cdn` |
+| `hd_pivots` | which other names shared an A, AAAA or NS value, and when the periods overlapped; CDN addresses are listed in `excluded_cdn` instead |
 | `hd_events` | what changed — new or removed values, NXDOMAIN, resurrection, sinkhole or parking NS, SOA serial, TTL |
 | `hd_campaigns` | the campaigns and how many domains each watches |
 | `hd_campaign_domains` | the domains of one campaign, by id or exact name |
@@ -38,6 +38,17 @@ history. Write tools need an `analyst` token; with a `viewer` token Heimdall's
 403 comes back as is.
 
 Results are compact JSON, untruncated.
+
+In `hd_domain`, a change with `"scope": "zone"` is a change of the parent
+zone, tracked by Heimdall as `zone:<fqdn>` (its SOA or NS), not of the name's
+own records; `"scope": "name"` is the name itself. A `current` entry whose
+`rdata` holds CDN addresses carries `"cdn": {"<ip>": "<provider>"}`, absent
+otherwise.
+
+`hd_pivots` returns `pivots` and `excluded_cdn`: the A and AAAA values of the
+name that fall in Heimdall's CDN prefixes are not pivoted on and are listed as
+`{"value", "provider"}`. Against a Heimdall that predates this list,
+`excluded_cdn` is empty.
 
 ## Configuration
 
@@ -91,6 +102,7 @@ hdctl set-domain -enabled=false www.example.com
 hdctl set-domain -campaign '' www.example.com
 ```
 
+`pivots` prints the CDN exclusions in `excluded_cdn` next to `pivots`.
 `add-domains` reads `-f` one domain per line, `#` starting a comment, `-` for
 stdin, and defaults to a 43200-second (12-hour) interval. It exits 1 if any
 domain failed.
@@ -128,6 +140,7 @@ domain failed.
   not a global sensor network. Absence proves nothing.
 - **Shared values are leads, not attribution.** Shared hosting, CDNs and
   parking providers put unrelated names on the same IPs and nameservers.
+  Heimdall only sets aside the CDN prefixes its operator listed.
 - **Passive DNS times are COF**, Unix epoch seconds in `time_first` and
   `time_last`; every other date is RFC 3339 UTC.
 - **Campaign names are case-sensitive.** A value that matches one campaign's id
