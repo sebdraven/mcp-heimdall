@@ -54,17 +54,23 @@ type COFRecord struct {
 	Count     uint64 `json:"count"`
 }
 
+// Current is the latest answer of one qtype and resolver. CDN maps the CDN
+// addresses among Rdata to their provider.
 type Current struct {
-	QType    string   `json:"qtype"`
-	Resolver string   `json:"resolver"`
-	TS       string   `json:"ts"`
-	Rcode    string   `json:"rcode"`
-	TTL      uint32   `json:"ttl"`
-	Rdata    []string `json:"rdata"`
+	QType    string            `json:"qtype"`
+	Resolver string            `json:"resolver"`
+	TS       string            `json:"ts"`
+	Rcode    string            `json:"rcode"`
+	TTL      uint32            `json:"ttl"`
+	Rdata    []string          `json:"rdata"`
+	CDN      map[string]string `json:"cdn,omitempty"`
 }
 
+// Change is a move of a tracked set. Scope is "name", or "zone" for a change
+// of the zone tracked as zone:<fqdn>.
 type Change struct {
 	TS        string   `json:"ts"`
+	Scope     string   `json:"scope"`
 	QType     string   `json:"qtype"`
 	Resolver  string   `json:"resolver"`
 	PrevRcode string   `json:"prev_rcode"`
@@ -117,6 +123,18 @@ type Pivot struct {
 	Target  Period  `json:"target"`
 	Other   Period  `json:"other"`
 	Overlap *Period `json:"overlap"`
+}
+
+type ExcludedCDN struct {
+	Value    string `json:"value"`
+	Provider string `json:"provider"`
+}
+
+// PivotsResult is the answer of /api/pivots. ExcludedCDN lists the A and AAAA
+// values left out as CDN addresses.
+type PivotsResult struct {
+	Pivots      []Pivot       `json:"pivots"`
+	ExcludedCDN []ExcludedCDN `json:"excluded_cdn"`
 }
 
 type NewDomain struct {
@@ -349,6 +367,34 @@ func (c *Client) Events(ctx context.Context, q EventQuery) ([]Event, error) {
 	return call[[]Event](ctx, c, http.MethodGet, "/api/events", v, nil)
 }
 
-func (c *Client) Pivots(ctx context.Context, fqdn string, limit int) ([]Pivot, error) {
-	return call[[]Pivot](ctx, c, http.MethodGet, "/api/pivots/"+url.PathEscape(fqdn), limitQuery(limit), nil)
+func (c *Client) Pivots(ctx context.Context, fqdn string, limit int) (PivotsResult, error) {
+	path := "/api/pivots/" + url.PathEscape(fqdn)
+	raw, err := call[json.RawMessage](ctx, c, http.MethodGet, path, limitQuery(limit), nil)
+	if err != nil {
+		return PivotsResult{}, err
+	}
+	res, err := DecodePivots(raw)
+	if err != nil {
+		return res, fmt.Errorf("heimdall GET %s: decoding: %w", path, err)
+	}
+	return res, nil
+}
+
+// DecodePivots accepts the object of current servers and the bare array of
+// servers predating excluded_cdn, so either side can be deployed first.
+func DecodePivots(raw []byte) (PivotsResult, error) {
+	var res PivotsResult
+	var err error
+	if b := bytes.TrimLeft(raw, " \t\r\n"); len(b) > 0 && b[0] == '[' {
+		err = json.Unmarshal(b, &res.Pivots)
+	} else {
+		err = json.Unmarshal(raw, &res)
+	}
+	if res.Pivots == nil {
+		res.Pivots = []Pivot{}
+	}
+	if res.ExcludedCDN == nil {
+		res.ExcludedCDN = []ExcludedCDN{}
+	}
+	return res, err
 }

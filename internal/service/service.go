@@ -51,11 +51,12 @@ type DomainResult struct {
 }
 
 type PivotsResult struct {
-	FQDN      string           `json:"fqdn"`
-	FetchedAt string           `json:"fetched_at"`
-	Returned  int              `json:"returned"`
-	Pivots    []heimdall.Pivot `json:"pivots"`
-	Note      string           `json:"note,omitempty"`
+	FQDN        string                 `json:"fqdn"`
+	FetchedAt   string                 `json:"fetched_at"`
+	Returned    int                    `json:"returned"`
+	Pivots      []heimdall.Pivot       `json:"pivots"`
+	ExcludedCDN []heimdall.ExcludedCDN `json:"excluded_cdn"`
+	Note        string                 `json:"note,omitempty"`
 }
 
 type EventsResult struct {
@@ -152,11 +153,12 @@ func (s *Service) Pivots(ctx context.Context, fqdn string, limit int) (PivotsRes
 		return PivotsResult{}, err
 	}
 	return PivotsResult{
-		FQDN:      fqdn,
-		FetchedAt: s.stamp(),
-		Returned:  len(ps),
-		Pivots:    ps,
-		Note:      fullPage(len(ps), limit, pivotsLimit),
+		FQDN:        fqdn,
+		FetchedAt:   s.stamp(),
+		Returned:    len(ps.Pivots),
+		Pivots:      ps.Pivots,
+		ExcludedCDN: ps.ExcludedCDN,
+		Note:        fullPage(len(ps.Pivots), limit, pivotsLimit),
 	}, nil
 }
 

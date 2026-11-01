@@ -64,6 +64,8 @@ func Register(s *mcp.Server, svc *service.Service) {
 			"the current state (latest answer per qtype and resolver over the last 7 days: rcode, TTL, rdata), " +
 			"the change timeline (each change is a move of the tracked set, rcode or TTL, with the values added and removed) " +
 			"and the passive DNS records it owns (first_seen, last_seen in RFC 3339 UTC). " +
+			"Each change has a scope: name for a change of the name's own records, zone for a change of the parent zone tracked as zone:<fqdn> (its SOA or NS), not of the name. " +
+			"A current entry whose rdata holds CDN addresses has cdn, mapping each such IP to its provider: unrelated names share these IPs, so they are no infrastructure link. " +
 			scope + termRRName + termRData + termTracked +
 			"changes_limit: default 200, max 1000; passive DNS is capped at 1000 records.",
 	}, r.domain)
@@ -73,6 +75,7 @@ func Register(s *mcp.Server, svc *service.Service) {
 		Description: "Other owner names that shared an A, AAAA or NS rdata with this name, with each side's observation period and their overlap (null when the periods never met). " +
 			"Shared hosting makes shared IPs common: an overlap is a lead, not attribution. " +
 			"Only values owned by the name itself count, so for a CNAME'd name pivot on its CNAME target; results may include names outside the watchlist. " +
+			"A and AAAA values that are CDN addresses (from the operator's list of CDN prefixes) are excluded from the pivots and listed in excluded_cdn with their provider; an older Heimdall returns excluded_cdn empty. " +
 			scope + termRRName + termRData +
 			"Server default limit 1000, max 10000.",
 	}, r.pivots)
