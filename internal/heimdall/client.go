@@ -130,11 +130,29 @@ type ExcludedCDN struct {
 	Provider string `json:"provider"`
 }
 
+// NSMatch is another name whose NS set equals the zone's.
+type NSMatch struct {
+	Domain  string  `json:"domain"`
+	Other   Period  `json:"other"`
+	Target  Period  `json:"target"`
+	Overlap *Period `json:"overlap"`
+}
+
+// NSPairs is the zone of a name, its sorted NS set and the other names holding
+// exactly that set.
+type NSPairs struct {
+	Zone    string    `json:"zone"`
+	NS      []string  `json:"ns"`
+	Matches []NSMatch `json:"matches"`
+}
+
 // PivotsResult is the answer of /api/pivots. ExcludedCDN lists the A and AAAA
-// values left out as CDN addresses.
+// values left out as CDN addresses; NSPairs is nil without a zone of at least
+// two nameservers.
 type PivotsResult struct {
 	Pivots      []Pivot       `json:"pivots"`
 	ExcludedCDN []ExcludedCDN `json:"excluded_cdn"`
+	NSPairs     *NSPairs      `json:"ns_pairs"`
 }
 
 type NewDomain struct {
@@ -381,7 +399,8 @@ func (c *Client) Pivots(ctx context.Context, fqdn string, limit int) (PivotsResu
 }
 
 // DecodePivots accepts the object of current servers and the bare array of
-// servers predating excluded_cdn, so either side can be deployed first.
+// servers predating excluded_cdn, which leaves NSPairs nil, so either side
+// can be deployed first.
 func DecodePivots(raw []byte) (PivotsResult, error) {
 	var res PivotsResult
 	var err error
@@ -395,6 +414,9 @@ func DecodePivots(raw []byte) (PivotsResult, error) {
 	}
 	if res.ExcludedCDN == nil {
 		res.ExcludedCDN = []ExcludedCDN{}
+	}
+	if res.NSPairs != nil && res.NSPairs.Matches == nil {
+		res.NSPairs.Matches = []NSMatch{}
 	}
 	return res, err
 }

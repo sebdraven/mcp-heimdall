@@ -72,10 +72,14 @@ func Register(s *mcp.Server, svc *service.Service) {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "hd_pivots",
-		Description: "Other owner names that shared an A, AAAA or NS rdata with this name, with each side's observation period and their overlap (null when the periods never met). " +
-			"Shared hosting makes shared IPs common: an overlap is a lead, not attribution. " +
-			"Only values owned by the name itself count, so for a CNAME'd name pivot on its CNAME target; results may include names outside the watchlist. " +
-			"A and AAAA values that are CDN addresses (from the operator's list of CDN prefixes) are excluded from the pivots and listed in excluded_cdn with their provider; an older Heimdall returns excluded_cdn empty. " +
+		Description: "Other owner names linked to this name, two ways, each with both sides' observation periods and their overlap (null when the periods never met). " +
+			"pivots: names that shared one of its A or AAAA values. Shared hosting makes shared IPs common: an overlap is a lead, not attribution. " +
+			"A and AAAA values that are CDN addresses (from the operator's list of CDN prefixes) are not pivoted on and are listed in excluded_cdn with their provider. " +
+			"Only values owned by the name itself count, so for a CNAME'd name pivot on its CNAME target. " +
+			"ns_pairs: the zone of the name (the name itself or its nearest ancestor owning NS records seen in the last 7 days), its sorted NS set, and in matches the other names whose current NS set is strictly identical. " +
+			"An identical set is a strong sign of one operator: providers such as Cloudflare give each account its own nameserver pair, so the same pair means the same account; CDN prefixes do not apply here. " +
+			"ns_pairs is null when no zone is found or its set has fewer than 2 nameservers. " +
+			"Results may include names outside the watchlist. An older Heimdall returns excluded_cdn empty and ns_pairs null. " +
 			scope + termRRName + termRData +
 			"Server default limit 1000, max 10000.",
 	}, r.pivots)
