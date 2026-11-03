@@ -173,6 +173,70 @@ func TestForbiddenStopsWrites(t *testing.T) {
 	}
 }
 
+func TestCreateCampaign(t *testing.T) {
+	for _, tc := range []struct {
+		desc, name string
+		status     int
+		reply      string
+		wantErr    string
+		wantStatus int
+		wantReqs   string
+	}{
+		{
+			desc:     "created",
+			name:     " spynote-2026 ",
+			status:   http.StatusCreated,
+			reply:    `{"id":4,"name":"spynote-2026","family":"SpyNote","description":"","domains":0,"created_at":"2026-03-01T12:00:00Z"}`,
+			wantReqs: "POST /api/campaigns",
+		},
+		{
+			desc:     "conflict",
+			name:     "SpyNote",
+			status:   http.StatusConflict,
+			reply:    `{"error":"already exists"}`,
+			wantErr:  `campaign "SpyNote" already exists (id 2)`,
+			wantReqs: "POST /api/campaigns, GET /api/campaigns",
+		},
+		{
+			desc:       "forbidden",
+			name:       "spynote-2026",
+			status:     http.StatusForbidden,
+			reply:      `{"error":"forbidden"}`,
+			wantErr:    "forbidden",
+			wantStatus: http.StatusForbidden,
+			wantReqs:   "POST /api/campaigns",
+		},
+		{desc: "empty", name: "", wantErr: "name is required"},
+		{desc: "blank", name: " \t ", wantErr: "name is required"},
+	} {
+		var sent heimdall.Campaign
+		s, reqs := stub(t, func(w http.ResponseWriter, r *http.Request) {
+			json.NewDecoder(r.Body).Decode(&sent)
+			w.WriteHeader(tc.status)
+			w.Write([]byte(tc.reply))
+		})
+		c, err := s.CreateCampaign(context.Background(), tc.name, "SpyNote", "")
+		if got := strings.Join(*reqs, ", "); got != tc.wantReqs {
+			t.Errorf("%s: requests = %q, want %q", tc.desc, got, tc.wantReqs)
+		}
+		if tc.wantErr == "" {
+			if err != nil || c.ID != 4 || c.Name != "spynote-2026" {
+				t.Errorf("%s: %+v, %v", tc.desc, c, err)
+			}
+			if sent.Name != "spynote-2026" || sent.Family != "SpyNote" {
+				t.Errorf("%s: sent %+v, want the trimmed name", tc.desc, sent)
+			}
+			continue
+		}
+		if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+			t.Errorf("%s: err %v, want one mentioning %q", tc.desc, err, tc.wantErr)
+		}
+		if tc.wantStatus != 0 && !heimdall.IsStatus(err, tc.wantStatus) {
+			t.Errorf("%s: err %v, want the HTTP %d as is", tc.desc, err, tc.wantStatus)
+		}
+	}
+}
+
 func TestPivotsExcludedCDN(t *testing.T) {
 	for _, tc := range []struct{ body, want string }{
 		{

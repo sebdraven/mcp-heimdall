@@ -169,6 +169,12 @@ type DomainPatch struct {
 	Enabled         *bool   `json:"enabled,omitempty"`
 }
 
+type newCampaign struct {
+	Name        string `json:"name"`
+	Family      string `json:"family"`
+	Description string `json:"description"`
+}
+
 type EventQuery struct {
 	Since    string
 	Kind     string
@@ -366,6 +372,10 @@ func (c *Client) DomainDetail(ctx context.Context, fqdn string, changes int) (Do
 
 func (c *Client) Campaigns(ctx context.Context) ([]Campaign, error) {
 	return call[[]Campaign](ctx, c, http.MethodGet, "/api/campaigns", nil, nil)
+}
+
+func (c *Client) CreateCampaign(ctx context.Context, name, family, description string) (Campaign, error) {
+	return call[Campaign](ctx, c, http.MethodPost, "/api/campaigns", nil, newCampaign{Name: name, Family: family, Description: description})
 }
 
 func (c *Client) CampaignDomains(ctx context.Context, id int64) ([]Domain, error) {
