@@ -30,6 +30,7 @@ and change domains.
 | `hd_campaigns` | the campaigns and how many domains each watches |
 | `hd_campaign_domains` | the domains of one campaign, by id or exact name |
 | `hd_domains` | the whole watchlist, optionally only enabled or disabled entries |
+| `hd_create_campaign` | create a campaign, with optional malware family and description |
 | `hd_add_domains` | add domains to a campaign; reports added, already present and failed |
 | `hd_set_domain` | enable, disable, re-time or move one domain |
 

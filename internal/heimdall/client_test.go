@@ -107,6 +107,54 @@ func TestForbiddenIsReturnedWithStatusAndBody(t *testing.T) {
 	}
 }
 
+func TestCreateCampaign(t *testing.T) {
+	var gotMethod, gotPath, gotAuth string
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath, gotAuth = r.Method, r.URL.Path, r.Header.Get("Authorization")
+		json.NewDecoder(r.Body).Decode(&got)
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte(`{"id":4,"name":"spynote-2026","family":"SpyNote","description":"March wave","domains":0,"created_at":"2026-03-01T12:00:00Z"}`))
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL, "TOK").CreateCampaign(context.Background(), "spynote-2026", "SpyNote", "March wave")
+	if err != nil {
+		t.Fatalf("CreateCampaign: %v", err)
+	}
+	if gotMethod != http.MethodPost || gotPath != "/api/campaigns" || gotAuth != "Bearer TOK" {
+		t.Errorf("%s %s, Authorization %q", gotMethod, gotPath, gotAuth)
+	}
+	want := map[string]any{"name": "spynote-2026", "family": "SpyNote", "description": "March wave"}
+	if len(got) != len(want) {
+		t.Errorf("body = %v, want exactly the keys of %v", got, want)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("body[%q] = %v, want %q", k, got[k], v)
+		}
+	}
+	if c != (Campaign{ID: 4, Name: "spynote-2026", Family: "SpyNote", Description: "March wave", CreatedAt: "2026-03-01T12:00:00Z"}) {
+		t.Errorf("campaign = %+v", c)
+	}
+}
+
+func TestCreateCampaignForbidden(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	_, err := New(srv.URL, "TOK").CreateCampaign(context.Background(), "spynote-2026", "", "")
+	var ae *APIError
+	if !errors.As(err, &ae) || ae.StatusCode != http.StatusForbidden || ae.Method != http.MethodPost || ae.Path != "/api/campaigns" {
+		t.Fatalf("err = %v, want the 403 of POST /api/campaigns", err)
+	}
+	if ae.Body != `{"error":"forbidden"}` {
+		t.Errorf("body = %q", ae.Body)
+	}
+}
+
 func TestEventDetailKeepsDigits(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`[{"ts":"2026-03-01T12:00:00Z","domain":"x.example","campaign":"","kind":"soa_serial_change","qtype":"SOA","resolver":"9.9.9.9:53","detail":{"prev_serial":4294967295,"new_serial":2026030101}}]`))

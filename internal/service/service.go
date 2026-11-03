@@ -220,6 +220,28 @@ func (s *Service) Campaigns(ctx context.Context) (CampaignsResult, error) {
 	return CampaignsResult{FetchedAt: s.stamp(), Campaigns: cs}, nil
 }
 
+// CreateCampaign reads the campaigns back on a 409 to name the id already
+// holding the name.
+func (s *Service) CreateCampaign(ctx context.Context, name, family, description string) (heimdall.Campaign, error) {
+	if name = strings.TrimSpace(name); name == "" {
+		return heimdall.Campaign{}, fmt.Errorf("name is required")
+	}
+	c, err := s.client.CreateCampaign(ctx, name, family, description)
+	if !heimdall.IsStatus(err, http.StatusConflict) {
+		return c, err
+	}
+	cs, err := s.client.Campaigns(ctx)
+	if err != nil {
+		return heimdall.Campaign{}, fmt.Errorf("campaign %q already exists; reading its id: %w", name, err)
+	}
+	for _, c := range cs {
+		if c.Name == name {
+			return heimdall.Campaign{}, fmt.Errorf("campaign %q already exists (id %d)", name, c.ID)
+		}
+	}
+	return heimdall.Campaign{}, fmt.Errorf("campaign %q already exists", name)
+}
+
 // ResolveCampaign matches ref against campaign ids and exact, case-sensitive
 // names. A ref matching both an id and another campaign's name is ambiguous.
 func (s *Service) ResolveCampaign(ctx context.Context, ref string) (heimdall.Campaign, error) {

@@ -113,6 +113,12 @@ func Register(s *mcp.Server, svc *service.Service) {
 	}, r.domains)
 
 	mcp.AddTool(s, &mcp.Tool{
+		Name: "hd_create_campaign",
+		Description: "Create a campaign (name, optional malware family and description) to group watchlist entries; " +
+			"names are exact and case-sensitive, and hd_add_domains takes the name or the returned id. " + termWrite,
+	}, r.createCampaign)
+
+	mcp.AddTool(s, &mcp.Tool{
 		Name: "hd_add_domains",
 		Description: "Add domains to the watchlist under one campaign (id or exact, case-sensitive name), one request per domain. " +
 			"Returns which were added, which were already present (left untouched, even if in another campaign) and which failed with their error. " +
@@ -161,6 +167,12 @@ type campaignDomainsInput struct {
 
 type domainsInput struct {
 	Enabled *bool `json:"enabled,omitempty" jsonschema:"true for enabled domains only, false for disabled only; omit for all"`
+}
+
+type createCampaignInput struct {
+	Name        string `json:"name" jsonschema:"campaign name, exact and case-sensitive"`
+	Family      string `json:"family,omitempty" jsonschema:"malware family, e.g. SpyNote"`
+	Description string `json:"description,omitempty" jsonschema:"free text"`
 }
 
 type addDomainsInput struct {
@@ -213,6 +225,11 @@ func (r *registry) campaignDomains(ctx context.Context, _ *mcp.CallToolRequest, 
 
 func (r *registry) domains(ctx context.Context, _ *mcp.CallToolRequest, in domainsInput) (*mcp.CallToolResult, service.DomainsResult, error) {
 	res, err := r.svc.Domains(ctx, in.Enabled)
+	return nil, res, err
+}
+
+func (r *registry) createCampaign(ctx context.Context, _ *mcp.CallToolRequest, in createCampaignInput) (*mcp.CallToolResult, heimdall.Campaign, error) {
+	res, err := r.svc.CreateCampaign(ctx, in.Name, in.Family, in.Description)
 	return nil, res, err
 }
 
