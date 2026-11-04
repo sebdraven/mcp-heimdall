@@ -22,15 +22,24 @@ const (
 	pdnsLimit   = 10000
 	eventsLimit = 1000
 	pivotsLimit = 1000
+	vtRows      = 500
+)
+
+// VTEnrich polls a job every vtPollInterval for at most vtWaitLimit.
+const (
+	vtPollInterval = 2 * time.Second
+	vtWaitLimit    = 5 * time.Minute
 )
 
 type Service struct {
 	client *heimdall.Client
 	now    func() time.Time
+	vtPoll time.Duration
+	vtWait time.Duration
 }
 
 func New(c *heimdall.Client) *Service {
-	return &Service{client: c, now: time.Now}
+	return &Service{client: c, now: time.Now, vtPoll: vtPollInterval, vtWait: vtWaitLimit}
 }
 
 type PDNSResult struct {
@@ -48,6 +57,7 @@ type DomainResult struct {
 	Current   []heimdall.Current   `json:"current"`
 	Changes   []heimdall.Change    `json:"changes"`
 	PDNS      []heimdall.PDNSEntry `json:"pdns"`
+	VT        *heimdall.VTInfo     `json:"vt"`
 }
 
 type PivotsResult struct {
@@ -96,6 +106,38 @@ type AddDomainsResult struct {
 	Failed          []DomainError     `json:"failed"`
 }
 
+type VTIPResult struct {
+	IP         string            `json:"ip"`
+	FetchedAt  string            `json:"fetched_at"`
+	LookedUpAt *string           `json:"looked_up_at"`
+	Status     *string           `json:"status"`
+	Returned   int               `json:"returned"`
+	Names      []heimdall.VTName `json:"names"`
+	Note       string            `json:"note,omitempty"`
+}
+
+type VTBudgetResult struct {
+	FetchedAt string `json:"fetched_at"`
+	Budget    int    `json:"budget"`
+	UsedToday int    `json:"used_today"`
+	Remaining int    `json:"remaining"`
+}
+
+// VTEnrichResult is the job of an enrichment; Summary is nil until it has
+// finished.
+type VTEnrichResult struct {
+	Domain     string              `json:"domain,omitempty"`
+	Depth      int                 `json:"depth,omitempty"`
+	Campaign   *heimdall.Campaign  `json:"campaign,omitempty"`
+	FetchedAt  string              `json:"fetched_at"`
+	State      string              `json:"state"`
+	StartedAt  *string             `json:"started_at"`
+	FinishedAt *string             `json:"finished_at"`
+	Summary    *heimdall.VTSummary `json:"summary"`
+	Error      string              `json:"error,omitempty"`
+	Note       string              `json:"note,omitempty"`
+}
+
 func (s *Service) stamp() string { return s.now().UTC().Format(time.RFC3339) }
 
 func fullPage(returned, limit, serverDefault int) string {
@@ -142,7 +184,7 @@ func (s *Service) Domain(ctx context.Context, fqdn string, changes int) (DomainR
 	if err != nil {
 		return DomainResult{}, err
 	}
-	return DomainResult{FQDN: fqdn, FetchedAt: s.stamp(), Domain: d.Domain, Current: d.Current, Changes: d.Changes, PDNS: d.PDNS}, nil
+	return DomainResult{FQDN: fqdn, FetchedAt: s.stamp(), Domain: d.Domain, Current: d.Current, Changes: d.Changes, PDNS: d.PDNS, VT: d.VT}, nil
 }
 
 func (s *Service) Pivots(ctx context.Context, fqdn string, limit int) (PivotsResult, error) {
@@ -372,4 +414,112 @@ func (s *Service) SetDomain(ctx context.Context, fqdn string, enabled *bool, int
 		p.Campaign = &name
 	}
 	return s.client.PatchDomain(ctx, fqdn, p)
+}
+
+// vtErr names the cause of the 404 Heimdall answers without VirusTotal.
+func vtErr(err error) error {
+	if heimdall.IsStatus(err, http.StatusNotFound) {
+		return fmt.Errorf("VirusTotal is not configured on this Heimdall: %w", err)
+	}
+	return err
+}
+
+// VTIP reads the names VirusTotal saw on ip from Heimdall's cache.
+func (s *Service) VTIP(ctx context.Context, ip string) (VTIPResult, error) {
+	if ip = strings.TrimSpace(ip); ip == "" {
+		return VTIPResult{}, fmt.Errorf("ip is required")
+	}
+	v, err := s.client.VTIP(ctx, ip)
+	if err != nil {
+		return VTIPResult{}, vtErr(err)
+	}
+	if v.Names == nil {
+		v.Names = []heimdall.VTName{}
+	}
+	res := VTIPResult{IP: v.IP, FetchedAt: s.stamp(), LookedUpAt: v.LookedUpAt, Status: v.Status, Returned: len(v.Names), Names: v.Names}
+	if len(v.Names) >= vtRows {
+		res.Note = fmt.Sprintf("%d names, Heimdall's cap: more may exist.", len(v.Names))
+	}
+	return res, nil
+}
+
+func (s *Service) VTBudget(ctx context.Context) (VTBudgetResult, error) {
+	b, err := s.client.VTBudget(ctx)
+	if err != nil {
+		return VTBudgetResult{}, vtErr(err)
+	}
+	return VTBudgetResult{FetchedAt: s.stamp(), Budget: b.Budget, UsedToday: b.UsedToday, Remaining: b.Remaining}, nil
+}
+
+// VTEnrich enriches a domain to depth (1 or 2, default 1) or a campaign (id
+// or exact name). With wait it polls the job until it ends or vtWait has
+// passed; a job still running then is no error.
+func (s *Service) VTEnrich(ctx context.Context, domain, campaign string, depth int, wait bool) (VTEnrichResult, error) {
+	domain, campaign = strings.TrimSpace(domain), strings.TrimSpace(campaign)
+	var res VTEnrichResult
+	var t heimdall.VTTarget
+	switch {
+	case (domain == "") == (campaign == ""):
+		return res, fmt.Errorf("give either a domain or a campaign")
+	case domain != "":
+		if depth == 0 {
+			depth = 1
+		}
+		if depth != 1 && depth != 2 {
+			return res, fmt.Errorf("depth must be 1 or 2")
+		}
+		t = heimdall.VTTarget{FQDN: domain, Depth: depth}
+		res.Domain, res.Depth = domain, depth
+	default:
+		if depth != 0 {
+			return res, fmt.Errorf("depth applies to a domain only")
+		}
+		c, err := s.ResolveCampaign(ctx, campaign)
+		if err != nil {
+			return res, err
+		}
+		t = heimdall.VTTarget{Campaign: c.ID}
+		res.Campaign = &c
+	}
+
+	job, err := s.client.StartVTEnrich(ctx, t)
+	if err != nil {
+		return res, vtErr(err)
+	}
+	if wait {
+		var timedOut bool
+		if job, timedOut, err = s.waitVT(ctx, t, job); err != nil {
+			return res, vtErr(err)
+		}
+		if timedOut {
+			res.Note = fmt.Sprintf("still running after %s; enriching the same target while it runs returns this job without starting another", s.vtWait)
+		}
+	}
+	res.FetchedAt, res.State, res.Error = s.stamp(), job.State, job.Error
+	res.StartedAt, res.FinishedAt, res.Summary = job.StartedAt, job.FinishedAt, job.VTSummary
+	return res, nil
+}
+
+// waitVT polls the job of t while it runs, for at most vtWait; the bool
+// reports a job still running then.
+func (s *Service) waitVT(ctx context.Context, t heimdall.VTTarget, job heimdall.VTJob) (heimdall.VTJob, bool, error) {
+	limit := time.NewTimer(s.vtWait)
+	defer limit.Stop()
+	tick := time.NewTicker(s.vtPoll)
+	defer tick.Stop()
+	for job.State == "running" {
+		select {
+		case <-ctx.Done():
+			return job, false, ctx.Err()
+		case <-limit.C:
+			return job, true, nil
+		case <-tick.C:
+		}
+		next, err := s.client.VTEnrichState(ctx, t)
+		if err != nil {
+			return job, false, err
+		}
+		job = next
+	}
+	return job, false, nil
 }

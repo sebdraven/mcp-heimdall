@@ -294,6 +294,61 @@ func TestDomainDetailScopeAndCDN(t *testing.T) {
 	}
 }
 
+func TestVTEnrichRequests(t *testing.T) {
+	for _, tc := range []struct {
+		target VTTarget
+		start  bool
+		want   string
+	}{
+		{target: VTTarget{FQDN: "a.example", Depth: 2}, start: true, want: "POST /api/vt/enrich/domain/a.example?depth=2"},
+		{target: VTTarget{FQDN: "a.example"}, start: true, want: "POST /api/vt/enrich/domain/a.example?"},
+		{target: VTTarget{FQDN: "a.example", Depth: 2}, want: "GET /api/vt/enrich/domain/a.example?"},
+		{target: VTTarget{Campaign: 2, Depth: 2}, start: true, want: "POST /api/vt/enrich/campaign/2?"},
+		{target: VTTarget{Campaign: 2}, want: "GET /api/vt/enrich/campaign/2?"},
+	} {
+		var got string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			got = r.Method + " " + r.URL.Path + "?" + r.URL.RawQuery
+			w.Write([]byte(`{"job":"domain:a.example","state":"running","started_at":"2026-03-01T12:00:00Z"}`))
+		}))
+		c := New(srv.URL, "TOK")
+		var job VTJob
+		var err error
+		if tc.start {
+			job, err = c.StartVTEnrich(context.Background(), tc.target)
+		} else {
+			job, err = c.VTEnrichState(context.Background(), tc.target)
+		}
+		srv.Close()
+		if err != nil || got != tc.want || job.State != "running" || job.VTSummary != nil {
+			t.Errorf("%s: sent %q, got %+v, %v", tc.want, got, job, err)
+		}
+	}
+}
+
+func TestVTJobSummary(t *testing.T) {
+	for _, tc := range []struct {
+		body    string
+		summary *VTSummary
+	}{
+		{body: `{"state":"none"}`},
+		{body: `{"job":"domain:a.example","state":"running","started_at":"2026-03-01T12:00:00Z"}`},
+		{
+			body:    `{"job":"domain:a.example","state":"done","started_at":"2026-03-01T12:00:00Z","finished_at":"2026-03-01T12:00:05Z","looked_up":3,"cached":1,"skipped_cdn":1,"skipped_reserved":0,"skipped_budget":2,"stopped_reason":"daily budget reached"}`,
+			summary: &VTSummary{LookedUp: 3, Cached: 1, SkippedCDN: 1, SkippedBudget: 2, StoppedReason: "daily budget reached"},
+		},
+	} {
+		var j VTJob
+		if err := json.Unmarshal([]byte(tc.body), &j); err != nil {
+			t.Errorf("%s: %v", tc.body, err)
+			continue
+		}
+		if (j.VTSummary == nil) != (tc.summary == nil) || j.VTSummary != nil && *j.VTSummary != *tc.summary {
+			t.Errorf("%s: summary %+v, want %+v", tc.body, j.VTSummary, tc.summary)
+		}
+	}
+}
+
 func TestNoTokenIsAnError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("the server was called without a token")

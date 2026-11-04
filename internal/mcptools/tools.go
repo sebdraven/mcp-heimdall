@@ -36,6 +36,12 @@ const (
 		"ttl_change: with the tracked set unchanged, the TTL rose above twice its learnt ceiling or stayed below a quarter of it for a full window. "
 
 	termWrite = "The role of the API token decides: a viewer token gets the 403 back as is. "
+
+	termVT = "VirusTotal data is a history from another source than Heimdall's own measurements, kept in Heimdall's cache: " +
+		"looked_up_at and status (ok, empty or error) describe the last lookup and are null when there was none. "
+
+	termVTCache = "Read from Heimdall's cache only: this never calls VirusTotal nor spends its budget. " +
+		"An error if Heimdall has no VirusTotal configured. "
 )
 
 type registry struct{ svc *service.Service }
@@ -66,8 +72,11 @@ func Register(s *mcp.Server, svc *service.Service) {
 			"and the passive DNS records it owns (first_seen, last_seen in RFC 3339 UTC). " +
 			"Each change has a scope: name for a change of the name's own records, zone for a change of the parent zone tracked as zone:<fqdn> (its SOA or NS), not of the name. " +
 			"A current entry whose rdata holds CDN addresses has cdn, mapping each such IP to its provider: unrelated names share these IPs, so they are no infrastructure link. " +
+			"vt holds the past resolutions VirusTotal saw for the name (ip, first_seen, last_seen), a history from another source than Heimdall's measurements, " +
+			"read from Heimdall's cache: this tool never calls VirusTotal. vt is null when Heimdall has no VirusTotal configured; " +
+			"its looked_up_at and status are null when the domain has not been enriched yet (hd_vt_enrich), though resolutions cached by lookups of its addresses may already show. " +
 			scope + termRRName + termRData + termTracked +
-			"changes_limit: default 200, max 1000; passive DNS is capped at 1000 records.",
+			"changes_limit: default 200, max 1000; passive DNS is capped at 1000 records, VirusTotal resolutions at 500.",
 	}, r.domain)
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -130,6 +139,32 @@ func Register(s *mcp.Server, svc *service.Service) {
 		Description: "Change one watched domain: enable or disable its measurement, its interval_seconds (minimum 10), or its campaign (id or exact name; an empty string detaches it). " +
 			"Fields left out are unchanged. Disabling stops measurement and keeps the history. There is no deletion. " + termWrite,
 	}, r.setDomain)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "hd_vt_ip",
+		Description: "The names VirusTotal saw resolving to an IP (host_name, first_seen, last_seen), each with watched and, when watched, its campaign: " +
+			"the names not watched are candidates for hd_add_domains. " +
+			termVTCache + termVT + "Capped at 500 names.",
+	}, r.vtIP)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "hd_vt_enrich",
+		Description: "Look up with VirusTotal the domains and IPs of the graph of a domain (depth 1 or 2, default 1) or of a campaign (id or exact, case-sensitive name), " +
+			"storing what it saw in Heimdall's cache for hd_domain and hd_vt_ip. " +
+			"This costs VirusTotal lookups from a daily budget shared by every Heimdall user: prefer hd_vt_budget before enriching a whole campaign. " +
+			"Objects fetched recently count as cached, private and CDN addresses are skipped, and the run stops when the budget is spent. " +
+			"With wait (default true) the job is polled every 2 s until done or failed, for at most 5 minutes, and its summary returned " +
+			"(looked_up, cached, skipped_budget, skipped_cdn, skipped_reserved, stopped_reason); a job still running then comes back with state running, summary null and a note. " +
+			"Without wait the started job comes back at once. Enriching a target whose enrichment is running returns that job rather than starting another. " +
+			"An error if Heimdall has no VirusTotal configured. " + termWrite,
+	}, r.vtEnrich)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "hd_vt_budget",
+		Description: "The VirusTotal lookups of the current UTC day: budget, used_today, remaining. " +
+			"The budget is shared by every Heimdall user; hd_vt_enrich spends it, no other tool does. " +
+			"An error if Heimdall has no VirusTotal configured.",
+	}, r.vtBudget)
 }
 
 type pdnsInput struct {
@@ -188,6 +223,19 @@ type setDomainInput struct {
 	Campaign        *string `json:"campaign,omitempty" jsonschema:"campaign id or exact name; empty string detaches the domain"`
 }
 
+type vtIPInput struct {
+	IP string `json:"ip" jsonschema:"IPv4 or IPv6 address"`
+}
+
+type vtEnrichInput struct {
+	Domain   string `json:"domain,omitempty" jsonschema:"domain name to enrich; give this or campaign"`
+	Campaign string `json:"campaign,omitempty" jsonschema:"campaign id or exact, case-sensitive name; give this or domain"`
+	Depth    int    `json:"depth,omitempty" jsonschema:"graph depth around the domain: 1 (default) or 2; domain only"`
+	Wait     *bool  `json:"wait,omitempty" jsonschema:"poll the job until it ends, at most 5 minutes (default true)"`
+}
+
+type vtBudgetInput struct{}
+
 func (r *registry) pdnsQuery(ctx context.Context, _ *mcp.CallToolRequest, in pdnsInput) (*mcp.CallToolResult, service.PDNSResult, error) {
 	res, err := r.svc.PDNSQuery(ctx, in.RRName, in.Limit)
 	return nil, res, err
@@ -240,5 +288,20 @@ func (r *registry) addDomains(ctx context.Context, _ *mcp.CallToolRequest, in ad
 
 func (r *registry) setDomain(ctx context.Context, _ *mcp.CallToolRequest, in setDomainInput) (*mcp.CallToolResult, heimdall.Domain, error) {
 	res, err := r.svc.SetDomain(ctx, in.FQDN, in.Enabled, in.IntervalSeconds, in.Campaign)
+	return nil, res, err
+}
+
+func (r *registry) vtIP(ctx context.Context, _ *mcp.CallToolRequest, in vtIPInput) (*mcp.CallToolResult, service.VTIPResult, error) {
+	res, err := r.svc.VTIP(ctx, in.IP)
+	return nil, res, err
+}
+
+func (r *registry) vtEnrich(ctx context.Context, _ *mcp.CallToolRequest, in vtEnrichInput) (*mcp.CallToolResult, service.VTEnrichResult, error) {
+	res, err := r.svc.VTEnrich(ctx, in.Domain, in.Campaign, in.Depth, in.Wait == nil || *in.Wait)
+	return nil, res, err
+}
+
+func (r *registry) vtBudget(ctx context.Context, _ *mcp.CallToolRequest, _ vtBudgetInput) (*mcp.CallToolResult, service.VTBudgetResult, error) {
+	res, err := r.svc.VTBudget(ctx)
 	return nil, res, err
 }

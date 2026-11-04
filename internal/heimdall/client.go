@@ -91,12 +91,78 @@ type PDNSEntry struct {
 }
 
 // DomainDetail is what the /domains/{fqdn} page shows. Domain is nil when the
-// name is not in the watchlist.
+// name is not in the watchlist, VT when Heimdall has no VirusTotal.
 type DomainDetail struct {
 	Domain  *Domain     `json:"domain"`
 	Current []Current   `json:"current"`
 	Changes []Change    `json:"changes"`
 	PDNS    []PDNSEntry `json:"pdns"`
+	VT      *VTInfo     `json:"vt"`
+}
+
+// VTInfo is what Heimdall's cache holds of VirusTotal for a domain.
+// LookedUpAt and Status are nil until the domain itself is looked up.
+type VTInfo struct {
+	LookedUpAt  *string        `json:"looked_up_at"`
+	Status      *string        `json:"status"`
+	Resolutions []VTResolution `json:"resolutions"`
+}
+
+type VTResolution struct {
+	IP        string `json:"ip"`
+	FirstSeen string `json:"first_seen"`
+	LastSeen  string `json:"last_seen"`
+}
+
+// VTIP is what Heimdall's cache holds of VirusTotal for an address.
+type VTIP struct {
+	IP         string   `json:"ip"`
+	LookedUpAt *string  `json:"looked_up_at"`
+	Status     *string  `json:"status"`
+	Names      []VTName `json:"names"`
+}
+
+// VTName is a name VirusTotal saw on an address. Campaign is set when the
+// name is watched.
+type VTName struct {
+	HostName  string `json:"host_name"`
+	FirstSeen string `json:"first_seen"`
+	LastSeen  string `json:"last_seen"`
+	Watched   bool   `json:"watched"`
+	Campaign  string `json:"campaign"`
+}
+
+type VTBudget struct {
+	Budget    int `json:"budget"`
+	UsedToday int `json:"used_today"`
+	Remaining int `json:"remaining"`
+}
+
+type VTSummary struct {
+	LookedUp        int    `json:"looked_up"`
+	Cached          int    `json:"cached"`
+	SkippedCDN      int    `json:"skipped_cdn"`
+	SkippedReserved int    `json:"skipped_reserved"`
+	SkippedBudget   int    `json:"skipped_budget"`
+	StoppedReason   string `json:"stopped_reason"`
+}
+
+// VTJob is the state of an enrichment: running, done, failed, or none.
+// VTSummary is nil until it has finished.
+type VTJob struct {
+	Job        string  `json:"job"`
+	State      string  `json:"state"`
+	StartedAt  *string `json:"started_at"`
+	FinishedAt *string `json:"finished_at"`
+	Error      string  `json:"error"`
+	*VTSummary
+}
+
+// VTTarget is what an enrichment covers: FQDN to Depth, or else Campaign.
+type VTTarget struct {
+	FQDN     string
+	Depth    int
+	Campaign int64
 }
 
 // Event is one entry of the event stream. Detail is decoded with UseNumber, so
@@ -429,4 +495,34 @@ func DecodePivots(raw []byte) (PivotsResult, error) {
 		res.NSPairs.Matches = []NSMatch{}
 	}
 	return res, err
+}
+
+// VTIP reads the names VirusTotal saw on ip from Heimdall's cache.
+func (c *Client) VTIP(ctx context.Context, ip string) (VTIP, error) {
+	return call[VTIP](ctx, c, http.MethodGet, "/api/vt/ip/"+url.PathEscape(ip), nil, nil)
+}
+
+// VTBudget returns the VirusTotal lookups of the UTC day.
+func (c *Client) VTBudget(ctx context.Context) (VTBudget, error) {
+	return call[VTBudget](ctx, c, http.MethodGet, "/api/vt/budget", nil, nil)
+}
+
+func (t VTTarget) path() string {
+	if t.FQDN != "" {
+		return "/api/vt/enrich/domain/" + url.PathEscape(t.FQDN)
+	}
+	return "/api/vt/enrich/campaign/" + strconv.FormatInt(t.Campaign, 10)
+}
+
+// StartVTEnrich starts enriching t, or returns the job already running on it.
+func (c *Client) StartVTEnrich(ctx context.Context, t VTTarget) (VTJob, error) {
+	var q url.Values
+	if t.FQDN != "" && t.Depth > 0 {
+		q = url.Values{"depth": {strconv.Itoa(t.Depth)}}
+	}
+	return call[VTJob](ctx, c, http.MethodPost, t.path(), q, nil)
+}
+
+func (c *Client) VTEnrichState(ctx context.Context, t VTTarget) (VTJob, error) {
+	return call[VTJob](ctx, c, http.MethodGet, t.path(), nil, nil)
 }
