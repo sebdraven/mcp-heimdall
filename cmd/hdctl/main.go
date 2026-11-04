@@ -41,6 +41,9 @@ var commands = []struct {
 	{"domains", "[-enabled=true|false]", domains},
 	{"add-domains", "-campaign CAMPAIGN [-interval SECONDS] [-f FILE] [FQDN...]", addDomains},
 	{"set-domain", "[-enabled=true|false] [-interval SECONDS] [-campaign CAMPAIGN] FQDN", setDomain},
+	{"vt-ip", "IP", vtIP},
+	{"vt-enrich", "[-depth 1|2] [-wait=false] FQDN | -campaign CAMPAIGN [-wait=false]", vtEnrich},
+	{"vt-budget", "", vtBudget},
 }
 
 func usage() {
@@ -94,6 +97,9 @@ func main() {
 		log.Fatalf("encoding result: %v", err)
 	}
 	if r, ok := res.(service.AddDomainsResult); ok && len(r.Failed) > 0 {
+		os.Exit(1)
+	}
+	if r, ok := res.(service.VTEnrichResult); ok && r.State == "failed" {
 		os.Exit(1)
 	}
 }
@@ -221,6 +227,42 @@ func setDomain(ctx context.Context, svc *service.Service, args []string) (any, e
 		return nil, err
 	}
 	return svc.SetDomain(ctx, a[0], enabled.v, interval.v, campaign.v)
+}
+
+func vtIP(ctx context.Context, svc *service.Service, args []string) (any, error) {
+	fs := flag.NewFlagSet("vt-ip", flag.ExitOnError)
+	a, err := parse("vt-ip", fs, args, 1)
+	if err != nil {
+		return nil, err
+	}
+	return svc.VTIP(ctx, a[0])
+}
+
+func vtEnrich(ctx context.Context, svc *service.Service, args []string) (any, error) {
+	fs := flag.NewFlagSet("vt-enrich", flag.ExitOnError)
+	campaign := fs.String("campaign", "", "campaign id or exact name, instead of FQDN")
+	depth := fs.Int("depth", 0, "graph depth around FQDN: 1 (default) or 2")
+	wait := fs.Bool("wait", true, "poll the job until it ends, at most 5 minutes")
+	a, err := parse("vt-enrich", fs, args, -1)
+	if err != nil {
+		return nil, err
+	}
+	if len(a) > 1 {
+		return nil, fmt.Errorf("vt-enrich: want at most 1 argument, got %d", len(a))
+	}
+	fqdn := ""
+	if len(a) == 1 {
+		fqdn = a[0]
+	}
+	return svc.VTEnrich(ctx, fqdn, *campaign, *depth, *wait)
+}
+
+func vtBudget(ctx context.Context, svc *service.Service, args []string) (any, error) {
+	fs := flag.NewFlagSet("vt-budget", flag.ExitOnError)
+	if _, err := parse("vt-budget", fs, args, 0); err != nil {
+		return nil, err
+	}
+	return svc.VTBudget(ctx)
 }
 
 // readList reads one entry per line; '#' starts a comment.

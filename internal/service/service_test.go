@@ -1,6 +1,7 @@
 package service
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -282,5 +283,223 @@ func TestDomainsFilter(t *testing.T) {
 	}
 	if res.Returned != 1 || res.Domains[0].FQDN != "b.example" {
 		t.Errorf("result = %+v", res)
+	}
+}
+
+const (
+	enrichA    = "/api/vt/enrich/domain/a.example"
+	jobRunning = `{"job":"domain:a.example","state":"running","started_at":"2026-03-01T12:00:00Z"}`
+	jobDone    = `{"job":"domain:a.example","state":"done","started_at":"2026-03-01T12:00:00Z","finished_at":"2026-03-01T12:00:05Z","looked_up":3,"cached":1,"skipped_cdn":1,"skipped_reserved":0,"skipped_budget":0,"stopped_reason":""}`
+	jobFailed  = `{"job":"campaign:2","state":"failed","started_at":"2026-03-01T12:00:00Z","finished_at":"2026-03-01T12:10:00Z","looked_up":2,"cached":0,"skipped_cdn":0,"skipped_reserved":0,"skipped_budget":0,"stopped_reason":"","error":"timed out after 10m0s"}`
+	vtNames    = `{"host_name":"a.example","first_seen":"2026-01-01T00:00:00Z","last_seen":"2026-02-01T00:00:00Z","watched":true,"campaign":"spynote"},{"host_name":"new.example","first_seen":"2026-01-15T00:00:00Z","last_seen":"2026-02-15T00:00:00Z","watched":false,"campaign":""}`
+)
+
+func TestDomainVT(t *testing.T) {
+	for _, tc := range []struct{ vt, want string }{
+		{vt: `null`, want: `"vt":null`},
+		{
+			vt:   `{"looked_up_at":null,"status":null,"resolutions":[{"ip":"192.0.2.1","first_seen":"2026-01-01T00:00:00Z","last_seen":"2026-02-01T00:00:00Z"}]}`,
+			want: `"vt":{"looked_up_at":null,"status":null,"resolutions":[{"ip":"192.0.2.1","first_seen":"2026-01-01T00:00:00Z","last_seen":"2026-02-01T00:00:00Z"}]}`,
+		},
+		{
+			vt:   `{"looked_up_at":"2026-03-01T11:00:00Z","status":"empty","resolutions":[]}`,
+			want: `"vt":{"looked_up_at":"2026-03-01T11:00:00Z","status":"empty","resolutions":[]}`,
+		},
+	} {
+		s, _ := stub(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"domain":null,"current":[],"changes":[],"pdns":[],"vt":` + tc.vt + `}`))
+		})
+		res, err := s.Domain(context.Background(), "a.example", 0)
+		if err != nil {
+			t.Errorf("%s: %v", tc.vt, err)
+			continue
+		}
+		if (res.VT == nil) != (tc.vt == "null") {
+			t.Errorf("%s: vt = %+v", tc.vt, res.VT)
+		}
+		b, _ := json.Marshal(res)
+		if !strings.Contains(string(b), tc.want) {
+			t.Errorf("%s: result %s lacks %s", tc.vt, b, tc.want)
+		}
+	}
+}
+
+func TestVTIP(t *testing.T) {
+	for _, tc := range []struct{ body, want string }{
+		{
+			body: `{"ip":"192.0.2.1","looked_up_at":"2026-03-01T11:00:00Z","status":"ok","names":[` + vtNames + `]}`,
+			want: `"ip":"192.0.2.1","fetched_at":"2026-03-01T12:00:00Z","looked_up_at":"2026-03-01T11:00:00Z","status":"ok","returned":2,"names":[` + vtNames + `]}`,
+		},
+		{
+			body: `{"ip":"192.0.2.1","looked_up_at":null,"status":null,"names":[]}`,
+			want: `"looked_up_at":null,"status":null,"returned":0,"names":[]}`,
+		},
+	} {
+		s, reqs := stub(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(tc.body))
+		})
+		res, err := s.VTIP(context.Background(), " 192.0.2.1 ")
+		if err != nil {
+			t.Errorf("%s: %v", tc.body, err)
+			continue
+		}
+		if got := strings.Join(*reqs, ", "); got != "GET /api/vt/ip/192.0.2.1" {
+			t.Errorf("%s: requests = %s", tc.body, got)
+		}
+		b, _ := json.Marshal(res)
+		if !strings.Contains(string(b), tc.want) {
+			t.Errorf("%s: result %s lacks %s", tc.body, b, tc.want)
+		}
+	}
+}
+
+func TestVTBudget(t *testing.T) {
+	s, reqs := stub(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"budget":500,"used_today":120,"remaining":380}`))
+	})
+	res, err := s.VTBudget(context.Background())
+	if err != nil {
+		t.Fatalf("VTBudget: %v", err)
+	}
+	if got := strings.Join(*reqs, ", "); got != "GET /api/vt/budget" {
+		t.Errorf("requests = %s", got)
+	}
+	if res != (VTBudgetResult{FetchedAt: "2026-03-01T12:00:00Z", Budget: 500, UsedToday: 120, Remaining: 380}) {
+		t.Errorf("result = %+v", res)
+	}
+}
+
+func TestVTErrors(t *testing.T) {
+	s, reqs := stub(t, nil)
+	if _, err := s.VTIP(context.Background(), " "); err == nil || len(*reqs) != 0 {
+		t.Errorf("empty ip: err %v, requests %v", err, *reqs)
+	}
+	_, err := s.VTIP(context.Background(), "192.0.2.1")
+	if !heimdall.IsStatus(err, http.StatusNotFound) || !strings.Contains(err.Error(), "not configured") {
+		t.Errorf("VTIP err = %v, want the 404 named as no VirusTotal", err)
+	}
+	_, err = s.VTBudget(context.Background())
+	if !heimdall.IsStatus(err, http.StatusNotFound) || !strings.Contains(err.Error(), "not configured") {
+		t.Errorf("VTBudget err = %v, want the 404 named as no VirusTotal", err)
+	}
+}
+
+func TestVTEnrich(t *testing.T) {
+	for _, tc := range []struct {
+		desc     string
+		domain   string
+		campaign string
+		depth    int
+		wait     bool
+		status   int
+		post     string
+		gets     []string
+		waitFor  time.Duration
+		wantReqs string
+		wantQ    string
+		wantErr  string
+		state    string
+		summary  bool
+		note     string
+	}{
+		{
+			desc:     "domain, wait until done",
+			domain:   "a.example",
+			depth:    2,
+			wait:     true,
+			post:     jobRunning,
+			gets:     []string{jobRunning, jobDone},
+			wantReqs: "POST " + enrichA + ", GET " + enrichA + ", GET " + enrichA,
+			wantQ:    "depth=2",
+			state:    "done",
+			summary:  true,
+		},
+		{
+			desc:     "campaign by name, wait until failed",
+			campaign: "SpyNote",
+			wait:     true,
+			post:     jobRunning,
+			gets:     []string{jobFailed},
+			wantReqs: "GET /api/campaigns, POST /api/vt/enrich/campaign/2, GET /api/vt/enrich/campaign/2",
+			state:    "failed",
+			summary:  true,
+		},
+		{
+			desc:    "still running when the wait ends",
+			domain:  "a.example",
+			wait:    true,
+			post:    jobRunning,
+			gets:    []string{jobRunning},
+			waitFor: 20 * time.Millisecond,
+			wantQ:   "depth=1",
+			state:   "running",
+			note:    "still running after 20ms",
+		},
+		{desc: "no wait", domain: "a.example", post: jobRunning, wantReqs: "POST " + enrichA, wantQ: "depth=1", state: "running"},
+		{
+			desc:     "viewer token",
+			domain:   "a.example",
+			wait:     true,
+			status:   http.StatusForbidden,
+			post:     `{"error":"forbidden"}`,
+			wantReqs: "POST " + enrichA,
+			wantQ:    "depth=1",
+			wantErr:  "forbidden",
+		},
+		{
+			desc:     "VirusTotal not configured",
+			domain:   "a.example",
+			status:   http.StatusNotFound,
+			post:     `{"error":"not found"}`,
+			wantReqs: "POST " + enrichA,
+			wantQ:    "depth=1",
+			wantErr:  "not configured",
+		},
+		{desc: "unknown campaign", campaign: "missing", wantReqs: "GET /api/campaigns", wantErr: "no campaign"},
+		{desc: "both", domain: "a.example", campaign: "spynote", wantErr: "either"},
+		{desc: "neither", wantErr: "either"},
+		{desc: "depth 3", domain: "a.example", depth: 3, wantErr: "depth must be 1 or 2"},
+		{desc: "depth on a campaign", campaign: "spynote", depth: 2, wantErr: "domain only"},
+	} {
+		gets := 0
+		var gotQuery string
+		s, reqs := stub(t, func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPost {
+				gotQuery = r.URL.RawQuery
+				w.WriteHeader(cmp.Or(tc.status, http.StatusAccepted))
+				w.Write([]byte(tc.post))
+				return
+			}
+			w.Write([]byte(tc.gets[min(gets, len(tc.gets)-1)]))
+			gets++
+		})
+		s.vtPoll, s.vtWait = time.Millisecond, cmp.Or(tc.waitFor, 5*time.Second)
+		res, err := s.VTEnrich(context.Background(), tc.domain, tc.campaign, tc.depth, tc.wait)
+		// The polls of a wait that ran out are not counted.
+		if got := strings.Join(*reqs, ", "); tc.waitFor == 0 && got != tc.wantReqs {
+			t.Errorf("%s: requests = %q, want %q", tc.desc, got, tc.wantReqs)
+		}
+		if gotQuery != tc.wantQ {
+			t.Errorf("%s: query %q, want %q", tc.desc, gotQuery, tc.wantQ)
+		}
+		if tc.wantErr != "" {
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("%s: err %v, want one mentioning %q", tc.desc, err, tc.wantErr)
+			}
+			if tc.status != 0 && !heimdall.IsStatus(err, tc.status) {
+				t.Errorf("%s: err %v, want the HTTP %d as is", tc.desc, err, tc.status)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%s: %v", tc.desc, err)
+			continue
+		}
+		if res.State != tc.state || (res.Summary != nil) != tc.summary || (res.State == "failed") != (res.Error != "") {
+			t.Errorf("%s: result %+v", tc.desc, res)
+		}
+		if (tc.note == "") != (res.Note == "") || !strings.Contains(res.Note, tc.note) {
+			t.Errorf("%s: note %q, want one mentioning %q", tc.desc, res.Note, tc.note)
+		}
 	}
 }

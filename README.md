@@ -16,7 +16,7 @@ heimdall-cli token create --username alice --label mcp
 ```
 
 The token inherits the role of its user: `viewer` reads, `analyst` can also add
-and change domains.
+and change domains and run VirusTotal enrichments.
 
 ## Tools
 
@@ -24,7 +24,7 @@ and change domains.
 |---|---|
 | `hd_pdns_query` | which records a name owns — rrtype, rdata, first and last seen, count |
 | `hd_pdns_rdata` | which names held a value — IP, target name, MX/TXT/SOA text |
-| `hd_domain` | everything the domain page shows: watchlist entry, current state, change timeline, passive DNS; each change has a `scope`, current entries flag CDN addresses in `cdn` |
+| `hd_domain` | everything the domain page shows: watchlist entry, current state, change timeline, passive DNS; each change has a `scope`, current entries flag CDN addresses in `cdn`, `vt` holds VirusTotal's past resolutions |
 | `hd_pivots` | which other names shared an A or AAAA value (CDN addresses listed in `excluded_cdn` instead) or exactly the same NS set, and when the periods overlapped |
 | `hd_events` | what changed — new or removed values, NXDOMAIN, resurrection, sinkhole or parking NS, SOA serial, TTL |
 | `hd_campaigns` | the campaigns and how many domains each watches |
@@ -33,10 +33,13 @@ and change domains.
 | `hd_create_campaign` | create a campaign, with optional malware family and description |
 | `hd_add_domains` | add domains to a campaign; reports added, already present and failed |
 | `hd_set_domain` | enable, disable, re-time or move one domain |
+| `hd_vt_ip` | which names VirusTotal saw on an IP, from Heimdall's cache, each `watched` or not with its campaign |
+| `hd_vt_enrich` | look up with VirusTotal the graph of a domain (depth 1 or 2) or of a campaign; spends the daily budget |
+| `hd_vt_budget` | the VirusTotal lookups of the UTC day: budget, used, remaining |
 
 There is no deletion: disabling a domain stops measurement and keeps its
-history. Write tools need an `analyst` token; with a `viewer` token Heimdall's
-403 comes back as is.
+history. Write tools and `hd_vt_enrich` need an `analyst` token; with a
+`viewer` token Heimdall's 403 comes back as is.
 
 Results are compact JSON, untruncated.
 
@@ -60,6 +63,35 @@ otherwise.
   its set has fewer than 2 nameservers.
 
 Against an older Heimdall, `excluded_cdn` is empty and `ns_pairs` is `null`.
+
+### VirusTotal
+
+A Heimdall configured with a VirusTotal key caches what VirusTotal saw: the
+past resolutions of names and the names seen on addresses, a history from
+another source than Heimdall's own measurements.
+
+- `hd_domain` carries `vt`: `{"looked_up_at", "status", "resolutions"}`, each
+  resolution `{"ip", "first_seen", "last_seen"}`, read from the cache and never
+  from VirusTotal. `vt` is `null` when Heimdall has no VirusTotal.
+  `looked_up_at` and `status` (`ok`, `empty` or `error`) are `null` while the
+  domain itself has not been enriched, though resolutions cached by lookups of
+  its addresses may already show.
+- `hd_vt_ip` lists, from the cache, the names VirusTotal saw on an address,
+  each with `watched` and its `campaign`: the unwatched ones are candidates for
+  `hd_add_domains`.
+- `hd_vt_enrich` is the only tool that calls VirusTotal. It spends lookups
+  from a daily budget shared by every user of the Heimdall, so check
+  `hd_vt_budget` before enriching a whole campaign. With `wait` (the default)
+  it polls the job every 2 seconds until it is done or failed, for at most 5
+  minutes, and returns its `summary` (`looked_up`, `cached`, `skipped_budget`,
+  `skipped_cdn`, `skipped_reserved`, `stopped_reason`); a job still running
+  then comes back with `"state": "running"`, `summary` `null` and a note.
+  Enriching a target already being enriched returns the running job.
+- `hd_vt_budget` returns `budget`, `used_today` and `remaining` for the UTC
+  day.
+
+Without VirusTotal on the Heimdall side, the `hd_vt_*` tools fail with
+Heimdall's 404.
 
 ## Configuration
 
@@ -111,12 +143,16 @@ hdctl domains -enabled=false
 hdctl add-domains -campaign spynote-2026 -f domains.txt
 hdctl set-domain -enabled=false www.example.com
 hdctl set-domain -campaign '' www.example.com
+hdctl vt-ip 192.0.2.1
+hdctl vt-enrich -depth 2 www.example.com
+hdctl vt-enrich -campaign spynote-2026 -wait=false
+hdctl vt-budget
 ```
 
 `pivots` prints `excluded_cdn` and `ns_pairs` next to `pivots`.
 `add-domains` reads `-f` one domain per line, `#` starting a comment, `-` for
 stdin, and defaults to a 43200-second (12-hour) interval. It exits 1 if any
-domain failed.
+domain failed. `vt-enrich` exits 1 if the enrichment failed.
 
 ## Terms
 
