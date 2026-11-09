@@ -24,7 +24,10 @@ and change domains and run enrichments.
 (commit `1c2454d`, "Domain enrichment and link to campaign"), which serves
 `/api/enrich/domain`, `/api/domains/{fqdn}/enrich`, `/api/domains/{fqdn}/link`,
 `/api/graph/ns/{set}` and `/api/vt/enrich/ip/{ip}`. Against an older one they
-fail with its 404.
+fail with its 404. `hd_campaign_analytics` needs a Heimdall at or after
+[sebdraven/heimdall#13](https://github.com/sebdraven/heimdall/pull/13)
+(commit `1d8b575`, "Campaign analytics workspace"), which serves
+`/api/campaigns/{id}/analytics`.
 
 ## Tools
 
@@ -37,6 +40,7 @@ fail with its 404.
 | `hd_events` | what changed — new or removed values, NXDOMAIN, resurrection, sinkhole or parking NS, SOA serial, TTL |
 | `hd_campaigns` | the campaigns and how many domains each watches |
 | `hd_campaign_domains` | the domains of one campaign, by id or exact name |
+| `hd_campaign_analytics` | how a campaign behaved over 30 or 90 days: KPIs, domain states per day, events per kind, shared IPs and NS sets, VirusTotal leads, and chart specs ready to plot |
 | `hd_domains` | the whole watchlist, optionally only enabled or disabled entries |
 | `hd_create_campaign` | create a campaign, with optional malware family and description |
 | `hd_add_domains` | add domains to a campaign; reports added, already present and failed |
@@ -81,6 +85,66 @@ or of an enrichment's `zone`: the nameservers are lowercased, stripped of the
 trailing dot, sorted and deduplicated, and there must be 2 to 16 of them. It
 returns the names whose current NS set (last 7 days) is strictly identical,
 each with `watched` and `campaign`.
+
+### Campaign analytics
+
+`hd_campaign_analytics` reads Heimdall's analytics of one campaign (id or
+exact name) over the last 30 days, or 90 with `days: 90`. Every daily value
+is a UTC day of `liveness_summary.days`, oldest first, the last one today.
+
+The states come from Heimdall's active resolutions of the campaign's
+watchlist: on each day a domain takes the state of its last A or AAAA answer
+that day.
+
+| State | Meaning |
+|---|---|
+| `ok` | NOERROR with addresses |
+| `nx` | NXDOMAIN |
+| `fail` | any other rcode: SERVFAIL, REFUSED, timeout |
+| `none` | nothing measured that day: not yet watched, disabled, or not resolved |
+
+It returns:
+
+- `header`: the campaign, its number of domains and enabled ones,
+  `last_measured_at`, and `vt` (the VirusTotal budget, `null` without
+  VirusTotal);
+- `kpis`, each `{"value", "series"}` with one value per day, `value` being
+  today's: `resolving`, `nxdomain`, `failing` and `unmeasured` count the
+  domains `ok`, `nx`, `fail` and `none`; `active_ips` the distinct non-CDN
+  addresses answered; `cdn_share` the fraction (0 to 1) of the addresses
+  answered that are CDN addresses; `ns_sets` the distinct NS sets of at least
+  2 nameservers seen on the campaign's zones; `events_7d` the events of the 7
+  days ending that day;
+- `timeline`: the events per day and kind;
+- `liveness_summary`: per domain, its number of days `ok`, `nx`, `fail` and
+  `none`, `last_state` (today's) and `cells`, one letter per day oldest first
+  (`O` ok, `N` nx, `F` fail, `.` none), instead of Heimdall's raw matrix;
+- `clusters`: `ips`, the non-CDN addresses answered for at least two domains
+  (at most 30); `ns_sets`, the NS sets shared by several zones of the
+  campaign; `new_ips_per_day`; `excluded_cdn`, the number of CDN addresses
+  left out;
+- `vt_leads`: names not watched that VirusTotal saw on the campaign's
+  addresses, from Heimdall's cache;
+- `events`: the 50 most recent;
+- `charts`.
+
+The tool draws nothing. `charts` is a list of specs for the client to plot,
+one per chart:
+`{"id", "title", "style", "x_label", "y_label", "x", "series": [{"name", "values"}]}`,
+`style` being `line` or `bar`, every `values` as long as `x` and numbers only.
+
+| Chart | Style | x | Series |
+|---|---|---|---|
+| `kpi_states` | line | days | `resolving`, `nxdomain`, `failing`, `unmeasured` |
+| `kpi_infra` | line | days | `active_ips`, `ns_sets` |
+| `cdn_share` | line | days | `cdn_share` in percent (the fraction × 100) |
+| `events_by_kind` | bar | days | one per event kind, 0 on days without |
+| `new_ips_per_day` | bar | days | `new_ips`: the campaign's addresses first seen in Heimdall's passive DNS that day |
+| `liveness_by_day` | bar | days | `ok`, `nx`, `fail`, `none`: domains in each state |
+| `top_ip_clusters` | bar | the 10 addresses shared by the most domains, then in address order | `domains`: how many share each |
+
+A chart with no `x` or only zeros is left out. With `charts_only`, only
+`campaign`, `days`, `header` and `charts` come back.
 
 ### Domain enrichment
 
@@ -193,6 +257,8 @@ hdctl pivots www.example.com
 hdctl events -since 7d -kind ns_sinkhole
 hdctl campaigns
 hdctl campaign-domains spynote-2026
+hdctl analytics spynote-2026
+hdctl analytics -days 90 -charts spynote-2026
 hdctl domains -enabled=false
 hdctl add-domains -campaign spynote-2026 -f domains.txt
 hdctl set-domain -enabled=false www.example.com
@@ -211,6 +277,8 @@ hdctl ns-set ana.ns.cloudflare.com,bob.ns.cloudflare.com
 ```
 
 `pivots` prints `excluded_cdn` and `ns_pairs` next to `pivots`.
+`analytics` takes `-days 30` (the default) or `-days 90`, and `-charts` for
+`campaign`, `days`, `header` and `charts` only.
 `add-domains` reads `-f` one domain per line, `#` starting a comment, `-` for
 stdin, and defaults to a 43200-second (12-hour) interval. It exits 1 if any
 domain failed. `vt-enrich` and `enrich` exit 1 if the enrichment failed.
