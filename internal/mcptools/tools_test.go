@@ -35,6 +35,16 @@ const (
 	vtRunning = `{"job":"ip:192.0.2.1","state":"running","started_at":"2026-03-01T12:00:00Z"}`
 )
 
+const analyticsJSON = `{"days":30,` +
+	`"header":{"campaign":{"id":2,"name":"SpyNote","family":"SpyNote","description":""},"domains":1,"enabled":1,"last_measured_at":"2026-03-01T11:58:00Z","vt":null},` +
+	`"kpis":{"resolving":{"value":1,"series":[0,1]},"nxdomain":{"value":0,"series":[1,0]},"failing":{"value":0,"series":[0,0]},"unmeasured":{"value":0,"series":[0,0]},` +
+	`"active_ips":{"value":1,"series":[0,1]},"cdn_share":{"value":0.25,"series":[0,0.25]},"ns_sets":{"value":1,"series":[1,1]},"events_7d":{"value":2,"series":[1,2]}},` +
+	`"timeline":{"kinds":["new_rdata","nxdomain"],"days":[{"day":"2026-02-28","counts":{"nxdomain":1}},{"day":"2026-03-01","counts":{"new_rdata":1}}]},` +
+	`"liveness":{"days":["2026-02-28","2026-03-01"],"rows":[{"fqdn":"a.example","enabled":true,"first_seen":null,"cells":["nx","ok"]}]},` +
+	`"clusters":{"ips":[],"ns_sets":[],"new_ips_per_day":[{"day":"2026-02-28","ips":[]},{"day":"2026-03-01","ips":["192.0.2.1"]}],"excluded_cdn":0},` +
+	`"events":[{"ts":"2026-03-01T11:00:00Z","domain":"a.example","campaign":"SpyNote","kind":"new_rdata","qtype":"A","resolver":"9.9.9.9:53","detail":{"values":["192.0.2.1"]}}],` +
+	`"vt_leads":null}`
+
 // connect serves replies, keyed by method and path, behind the tools over an
 // in-memory session; anything else is a 404. requests records what Heimdall
 // was asked.
@@ -103,11 +113,12 @@ func TestNewToolsListed(t *testing.T) {
 		inputs[tool.Name] = string(b)
 	}
 	for name, params := range map[string][]string{
-		"hd_domain_enrich":     {"fqdn", "wait", "include_graph"},
-		"hd_domain_enrichment": {"fqdn", "include_graph"},
-		"hd_link_domain":       {"fqdn", "campaign", "new_campaign_name", "new_campaign_description"},
-		"hd_ns_set":            {"ns"},
-		"hd_vt_enrich":         {"domain", "campaign", "ip", "depth", "wait"},
+		"hd_campaign_analytics": {"campaign", "days", "charts_only"},
+		"hd_domain_enrich":      {"fqdn", "wait", "include_graph"},
+		"hd_domain_enrichment":  {"fqdn", "include_graph"},
+		"hd_link_domain":        {"fqdn", "campaign", "new_campaign_name", "new_campaign_description"},
+		"hd_ns_set":             {"ns"},
+		"hd_vt_enrich":          {"domain", "campaign", "ip", "depth", "wait"},
 	} {
 		schema, ok := inputs[name]
 		if !ok {
@@ -223,6 +234,25 @@ func TestNewTools(t *testing.T) {
 			want:     []string{`"ip":"192.0.2.1"`, `"state":"running"`},
 		},
 		{desc: "vt enrich an ip and a domain", tool: "hd_vt_enrich", args: map[string]any{"ip": "192.0.2.1", "domain": "a.example"}, wantErr: "either"},
+		{
+			desc:     "campaign analytics",
+			tool:     "hd_campaign_analytics",
+			args:     map[string]any{"campaign": "SpyNote"},
+			replies:  map[string]string{"GET /api/campaigns/2/analytics": analyticsJSON},
+			wantReqs: "GET /api/campaigns, GET /api/campaigns/2/analytics",
+			want:     []string{`"cells":"NO"`, `"last_state":"ok"`, `"vt_leads":[]`, `"vt":null`, `"id":"cdn_share"`, `"name":"cdn_share","values":[0,25]`, `"style":"bar"`},
+			notWant:  []string{`"rows"`, `"id":"top_ip_clusters"`},
+		},
+		{
+			desc:     "campaign analytics, charts only",
+			tool:     "hd_campaign_analytics",
+			args:     map[string]any{"campaign": "2", "days": 30, "charts_only": true},
+			replies:  map[string]string{"GET /api/campaigns/2/analytics": analyticsJSON},
+			wantReqs: "GET /api/campaigns, GET /api/campaigns/2/analytics",
+			want:     []string{`"days":30`, `"id":"kpi_states"`, `"header":{`},
+			notWant:  []string{`"kpis":`, `"timeline":`, `"liveness_summary":`, `"clusters":`, `"vt_leads":`, `"events":`},
+		},
+		{desc: "campaign analytics over 7 days", tool: "hd_campaign_analytics", args: map[string]any{"campaign": "SpyNote", "days": 7}, wantErr: "days must be 30 or 90"},
 	} {
 		cs, requests := connect(t, tc.replies)
 		res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: tc.tool, Arguments: tc.args})

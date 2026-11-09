@@ -596,6 +596,52 @@ func TestLinkDomainErrors(t *testing.T) {
 	}
 }
 
+const analyticsBody = `{"days":90,` +
+	`"header":{"campaign":{"id":7,"name":"SpyNote","family":"SpyNote","description":"March wave"},"domains":2,"enabled":1,"last_measured_at":"2026-03-01T11:58:00Z","vt":{"budget":500,"used_today":12,"remaining":488}},` +
+	`"kpis":{"resolving":{"value":1,"series":[0,1]},"nxdomain":{"value":0,"series":[1,0]},"failing":{"value":0,"series":[0,0]},"unmeasured":{"value":1,"series":[1,1]},` +
+	`"active_ips":{"value":2,"series":[1,2]},"cdn_share":{"value":0.3333,"series":[0,0.3333]},"ns_sets":{"value":1,"series":[1,1]},"events_7d":{"value":3,"series":[1,3]}},` +
+	`"timeline":{"kinds":["new_rdata","nxdomain"],"days":[{"day":"2026-02-28","counts":{"nxdomain":1}},{"day":"2026-03-01","counts":{"new_rdata":2}}]},` +
+	`"liveness":{"days":["2026-02-28","2026-03-01"],"rows":[{"fqdn":"a.example","enabled":true,"first_seen":"2026-01-10T08:00:00Z","cells":["nx","ok"]},{"fqdn":"b.example","enabled":false,"first_seen":null,"cells":["none","none"]}]},` +
+	`"clusters":{"ips":[{"ip":"192.0.2.1","domains":["a.example","c.example"],"first_seen":"2026-02-28","last_seen":"2026-03-01"}],` +
+	`"ns_sets":[{"ns":["ana.ns.cloudflare.com","bob.ns.cloudflare.com"],"zones":["a.example","c.example"],"domains":["a.example","c.example"]}],` +
+	`"new_ips_per_day":[{"day":"2026-02-28","ips":[]},{"day":"2026-03-01","ips":["192.0.2.1"]}],"excluded_cdn":1},` +
+	`"events":[{"ts":"2026-03-01T11:00:00Z","domain":"a.example","campaign":"SpyNote","kind":"soa_serial_change","qtype":"SOA","resolver":"9.9.9.9:53","detail":{"new":2026030112,"prev":2026030111}}],` +
+	`"vt_leads":[{"host_name":"new.example","ips":["192.0.2.1"],"last_seen":"2026-02-20T00:00:00Z"}]}`
+
+func TestCampaignAnalytics(t *testing.T) {
+	for _, tc := range []struct {
+		days  int
+		query string
+	}{
+		{days: 0},
+		{days: 30},
+		{days: 45},
+		{days: 90, query: "days=90"},
+	} {
+		var got, gotQuery string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			got, gotQuery = r.Method+" "+r.URL.Path, r.URL.RawQuery
+			w.Write([]byte(analyticsBody))
+		}))
+		a, err := New(srv.URL, "TOK").CampaignAnalytics(context.Background(), 7, tc.days)
+		srv.Close()
+		if err != nil {
+			t.Errorf("days %d: %v", tc.days, err)
+			continue
+		}
+		if got != "GET /api/campaigns/7/analytics" || gotQuery != tc.query {
+			t.Errorf("days %d: sent %q ?%s, want ?%s", tc.days, got, gotQuery, tc.query)
+		}
+		b, _ := json.Marshal(a)
+		if string(b) != analyticsBody {
+			t.Errorf("days %d: decoded and encoded back as\n%s\nwant\n%s", tc.days, b, analyticsBody)
+		}
+		if a.Header.VT == nil || a.Header.VT.Remaining != 488 || a.Liveness.Rows[1].FirstSeen != nil || a.KPIs.CDNShare.Value != 0.3333 || a.Timeline.Days[0].Counts["nxdomain"] != 1 {
+			t.Errorf("days %d: analytics %+v", tc.days, a)
+		}
+	}
+}
+
 func TestNSGraph(t *testing.T) {
 	var gotPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

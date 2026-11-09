@@ -122,6 +122,28 @@ func Register(s *mcp.Server, svc *service.Service) {
 	}, r.domains)
 
 	mcp.AddTool(s, &mcp.Tool{
+		Name: "hd_campaign_analytics",
+		Description: "The analytics of one campaign (id or exact, case-sensitive name) over the last 30 days (default) or 90: " +
+			"header (campaign, domains, enabled, last_measured_at, vt: the VirusTotal budget, null without VirusTotal), kpis, timeline (events per day and kind), liveness_summary, " +
+			"clusters (ips: non-CDN addresses answered for at least two domains, at most 30; ns_sets: NS sets shared by several zones of the campaign; new_ips_per_day; excluded_cdn: CDN addresses left out), " +
+			"vt_leads (names not watched that VirusTotal saw on the campaign's addresses, from Heimdall's cache), events (the 50 most recent) and charts. " +
+			"States come from Heimdall's active resolutions of the campaign's watchlist: on each UTC day a domain takes the state of its last A or AAAA answer that day, " +
+			"ok (NOERROR with addresses), nx (NXDOMAIN), fail (any other rcode: SERVFAIL, REFUSED, timeout) or none (nothing measured that day: not yet watched, disabled or not resolved). " +
+			"liveness_summary gives each domain its number of days in each state, last_state (today's) and cells, one letter per day oldest first: O ok, N nx, F fail, . none. " +
+			"KPIs hold one value per day: resolving, nxdomain, failing and unmeasured count the domains ok, nx, fail and none; active_ips counts the distinct non-CDN addresses answered; " +
+			"cdn_share is the fraction (0 to 1) of the addresses answered that are CDN addresses; ns_sets counts the distinct NS sets of at least 2 nameservers seen on the campaign's zones; events_7d sums the events of the 7 days ending that day. " +
+			"This tool draws nothing: charts is a list of specs for the client to plot, one spec per chart, " +
+			"{id, title, style (line or bar), x_label, y_label, x, series: [{name, values}]}, every values as long as x and numbers only; " +
+			"x is the UTC days (YYYY-MM-DD, oldest first, the last one today) except for top_ip_clusters. " +
+			"kpi_states (line): resolving, nxdomain, failing and unmeasured per day. kpi_infra (line): active_ips and ns_sets per day. " +
+			"cdn_share (line): cdn_share per day in percent, the fraction times 100. events_by_kind (bar): events per day, one series per event kind, 0 on days without. " +
+			"new_ips_per_day (bar): the campaign's addresses first seen in Heimdall's passive DNS on that day. liveness_by_day (bar): domains ok, nx, fail and none per day. " +
+			"top_ip_clusters (bar): x is the 10 addresses shared by the most domains, the series their number of domains. " +
+			"A chart with no x or only zeros is left out. With charts_only, only campaign, days, header and charts come back. " +
+			scope + termKinds,
+	}, r.campaignAnalytics)
+
+	mcp.AddTool(s, &mcp.Tool{
 		Name: "hd_create_campaign",
 		Description: "Create a campaign (name, optional malware family and description) to group watchlist entries; " +
 			"names are exact and case-sensitive, and hd_add_domains takes the name or the returned id. " + termWrite,
@@ -246,6 +268,12 @@ type domainsInput struct {
 	Enabled *bool `json:"enabled,omitempty" jsonschema:"true for enabled domains only, false for disabled only; omit for all"`
 }
 
+type campaignAnalyticsInput struct {
+	Campaign   string `json:"campaign" jsonschema:"campaign id or exact, case-sensitive name"`
+	Days       int    `json:"days,omitempty" jsonschema:"window in days: 30 (default) or 90"`
+	ChartsOnly bool   `json:"charts_only,omitempty" jsonschema:"return only campaign, days, header and charts (default false)"`
+}
+
 type createCampaignInput struct {
 	Name        string `json:"name" jsonschema:"campaign name, exact and case-sensitive"`
 	Family      string `json:"family,omitempty" jsonschema:"malware family, e.g. SpyNote"`
@@ -338,6 +366,11 @@ func (r *registry) campaignDomains(ctx context.Context, _ *mcp.CallToolRequest, 
 
 func (r *registry) domains(ctx context.Context, _ *mcp.CallToolRequest, in domainsInput) (*mcp.CallToolResult, service.DomainsResult, error) {
 	res, err := r.svc.Domains(ctx, in.Enabled)
+	return nil, res, err
+}
+
+func (r *registry) campaignAnalytics(ctx context.Context, _ *mcp.CallToolRequest, in campaignAnalyticsInput) (*mcp.CallToolResult, service.CampaignAnalyticsResult, error) {
+	res, err := r.svc.CampaignAnalytics(ctx, in.Campaign, in.Days, in.ChartsOnly)
 	return nil, res, err
 }
 

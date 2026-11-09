@@ -393,6 +393,111 @@ type PivotsResult struct {
 	NSPairs     *NSPairs      `json:"ns_pairs"`
 }
 
+// Analytics is the analytics of a campaign over Days days. KPI series,
+// liveness cells and timeline days hold one entry per UTC day of
+// Liveness.Days, oldest first, the last one being today.
+type Analytics struct {
+	Days     int             `json:"days"`
+	Header   AnalyticsHeader `json:"header"`
+	KPIs     KPIs            `json:"kpis"`
+	Timeline Timeline        `json:"timeline"`
+	Liveness Liveness        `json:"liveness"`
+	Clusters Clusters        `json:"clusters"`
+	Events   []Event         `json:"events"`
+	VTLeads  []VTLead        `json:"vt_leads"`
+}
+
+type AnalyticsCampaign struct {
+	ID          int64  `json:"id"`
+	Name        string `json:"name"`
+	Family      string `json:"family"`
+	Description string `json:"description"`
+}
+
+// AnalyticsHeader has VT nil when Heimdall has no VirusTotal.
+type AnalyticsHeader struct {
+	Campaign       AnalyticsCampaign `json:"campaign"`
+	Domains        int               `json:"domains"`
+	Enabled        int               `json:"enabled"`
+	LastMeasuredAt *string           `json:"last_measured_at"`
+	VT             *VTBudget         `json:"vt"`
+}
+
+// KPI holds one value per day; Value is the last one.
+type KPI struct {
+	Value  float64   `json:"value"`
+	Series []float64 `json:"series"`
+}
+
+// KPIs has CDNShare as a fraction, from 0 to 1.
+type KPIs struct {
+	Resolving  KPI `json:"resolving"`
+	NXDomain   KPI `json:"nxdomain"`
+	Failing    KPI `json:"failing"`
+	Unmeasured KPI `json:"unmeasured"`
+	ActiveIPs  KPI `json:"active_ips"`
+	CDNShare   KPI `json:"cdn_share"`
+	NSSets     KPI `json:"ns_sets"`
+	Events7d   KPI `json:"events_7d"`
+}
+
+type Timeline struct {
+	Kinds []string      `json:"kinds"`
+	Days  []TimelineDay `json:"days"`
+}
+
+type TimelineDay struct {
+	Day    string            `json:"day"`
+	Counts map[string]uint64 `json:"counts"`
+}
+
+// Liveness gives each domain one state per day: ok, nx, fail or none.
+type Liveness struct {
+	Days []string      `json:"days"`
+	Rows []LivenessRow `json:"rows"`
+}
+
+type LivenessRow struct {
+	FQDN      string   `json:"fqdn"`
+	Enabled   bool     `json:"enabled"`
+	FirstSeen *string  `json:"first_seen"`
+	Cells     []string `json:"cells"`
+}
+
+type Clusters struct {
+	IPs          []IPCluster `json:"ips"`
+	NSSets       []NSCluster `json:"ns_sets"`
+	NewIPsPerDay []NewIPs    `json:"new_ips_per_day"`
+	ExcludedCDN  int         `json:"excluded_cdn"`
+}
+
+// IPCluster is an address answered for several domains; its dates are days.
+type IPCluster struct {
+	IP        string   `json:"ip"`
+	Domains   []string `json:"domains"`
+	FirstSeen string   `json:"first_seen"`
+	LastSeen  string   `json:"last_seen"`
+}
+
+type NSCluster struct {
+	NS      []string `json:"ns"`
+	Zones   []string `json:"zones"`
+	Domains []string `json:"domains"`
+}
+
+type NewIPs struct {
+	Day string   `json:"day"`
+	IPs []string `json:"ips"`
+}
+
+// VTLead is a name not watched that VirusTotal saw on the campaign's
+// addresses.
+type VTLead struct {
+	HostName string   `json:"host_name"`
+	IPs      []string `json:"ips"`
+	LastSeen string   `json:"last_seen"`
+}
+
 type NewDomain struct {
 	FQDN            string `json:"fqdn"`
 	Campaign        string `json:"campaign,omitempty"`
@@ -618,6 +723,16 @@ func (c *Client) CreateCampaign(ctx context.Context, name, family, description s
 
 func (c *Client) CampaignDomains(ctx context.Context, id int64) ([]Domain, error) {
 	return call[[]Domain](ctx, c, http.MethodGet, "/api/campaigns/"+strconv.FormatInt(id, 10)+"/domains", nil, nil)
+}
+
+// CampaignAnalytics reads the analytics of campaign id over 90 days when days
+// is 90, over the server's 30 otherwise.
+func (c *Client) CampaignAnalytics(ctx context.Context, id int64, days int) (Analytics, error) {
+	var q url.Values
+	if days == 90 {
+		q = url.Values{"days": {"90"}}
+	}
+	return call[Analytics](ctx, c, http.MethodGet, "/api/campaigns/"+strconv.FormatInt(id, 10)+"/analytics", q, nil)
 }
 
 func (c *Client) Events(ctx context.Context, q EventQuery) ([]Event, error) {
