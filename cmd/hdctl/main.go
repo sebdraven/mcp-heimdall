@@ -42,8 +42,12 @@ var commands = []struct {
 	{"add-domains", "-campaign CAMPAIGN [-interval SECONDS] [-f FILE] [FQDN...]", addDomains},
 	{"set-domain", "[-enabled=true|false] [-interval SECONDS] [-campaign CAMPAIGN] FQDN", setDomain},
 	{"vt-ip", "IP", vtIP},
-	{"vt-enrich", "[-depth 1|2] [-wait=false] FQDN | -campaign CAMPAIGN [-wait=false]", vtEnrich},
+	{"vt-enrich", "[-depth 1|2] [-wait=false] FQDN | -campaign CAMPAIGN [-wait=false] | -ip IP [-wait=false]", vtEnrich},
 	{"vt-budget", "", vtBudget},
+	{"enrich", "[-no-wait] [-graph] FQDN", enrich},
+	{"enrichment", "[-graph] FQDN", enrichment},
+	{"link", "-campaign CAMPAIGN | -new NAME [-desc TEXT] FQDN", link},
+	{"ns-set", "NS1,NS2[,...]", nsSet},
 }
 
 func usage() {
@@ -100,6 +104,9 @@ func main() {
 		os.Exit(1)
 	}
 	if r, ok := res.(service.VTEnrichResult); ok && r.State == "failed" {
+		os.Exit(1)
+	}
+	if r, ok := res.(service.DomainEnrichResult); ok && r.State == "failed" {
 		os.Exit(1)
 	}
 }
@@ -241,6 +248,7 @@ func vtIP(ctx context.Context, svc *service.Service, args []string) (any, error)
 func vtEnrich(ctx context.Context, svc *service.Service, args []string) (any, error) {
 	fs := flag.NewFlagSet("vt-enrich", flag.ExitOnError)
 	campaign := fs.String("campaign", "", "campaign id or exact name, instead of FQDN")
+	ip := fs.String("ip", "", "IP address, instead of FQDN")
 	depth := fs.Int("depth", 0, "graph depth around FQDN: 1 (default) or 2")
 	wait := fs.Bool("wait", true, "poll the job until it ends, at most 5 minutes")
 	a, err := parse("vt-enrich", fs, args, -1)
@@ -254,7 +262,49 @@ func vtEnrich(ctx context.Context, svc *service.Service, args []string) (any, er
 	if len(a) == 1 {
 		fqdn = a[0]
 	}
-	return svc.VTEnrich(ctx, fqdn, *campaign, *depth, *wait)
+	return svc.VTEnrichRequest(ctx, service.VTRequest{Domain: fqdn, Campaign: *campaign, IP: *ip, Depth: *depth}, *wait)
+}
+
+func enrich(ctx context.Context, svc *service.Service, args []string) (any, error) {
+	fs := flag.NewFlagSet("enrich", flag.ExitOnError)
+	noWait := fs.Bool("no-wait", false, "return the started job at once")
+	graph := fs.Bool("graph", false, "include the graph of the enrichment")
+	a, err := parse("enrich", fs, args, 1)
+	if err != nil {
+		return nil, err
+	}
+	return svc.DomainEnrich(ctx, a[0], !*noWait, *graph)
+}
+
+func enrichment(ctx context.Context, svc *service.Service, args []string) (any, error) {
+	fs := flag.NewFlagSet("enrichment", flag.ExitOnError)
+	graph := fs.Bool("graph", false, "include the graph of the enrichment")
+	a, err := parse("enrichment", fs, args, 1)
+	if err != nil {
+		return nil, err
+	}
+	return svc.DomainEnrichment(ctx, a[0], *graph)
+}
+
+func link(ctx context.Context, svc *service.Service, args []string) (any, error) {
+	fs := flag.NewFlagSet("link", flag.ExitOnError)
+	campaign := fs.String("campaign", "", "campaign id or exact name")
+	newName := fs.String("new", "", "name of a campaign to create, instead of -campaign")
+	desc := fs.String("desc", "", "description of the campaign created with -new")
+	a, err := parse("link", fs, args, 1)
+	if err != nil {
+		return nil, err
+	}
+	return svc.LinkDomain(ctx, a[0], *campaign, *newName, *desc)
+}
+
+func nsSet(ctx context.Context, svc *service.Service, args []string) (any, error) {
+	fs := flag.NewFlagSet("ns-set", flag.ExitOnError)
+	a, err := parse("ns-set", fs, args, 1)
+	if err != nil {
+		return nil, err
+	}
+	return svc.NSSet(ctx, strings.Split(a[0], ","))
 }
 
 func vtBudget(ctx context.Context, svc *service.Service, args []string) (any, error) {

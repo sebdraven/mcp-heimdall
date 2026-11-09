@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -305,6 +306,8 @@ func TestVTEnrichRequests(t *testing.T) {
 		{target: VTTarget{FQDN: "a.example", Depth: 2}, want: "GET /api/vt/enrich/domain/a.example?"},
 		{target: VTTarget{Campaign: 2, Depth: 2}, start: true, want: "POST /api/vt/enrich/campaign/2?"},
 		{target: VTTarget{Campaign: 2}, want: "GET /api/vt/enrich/campaign/2?"},
+		{target: VTTarget{IP: "192.0.2.1"}, start: true, want: "POST /api/vt/enrich/ip/192.0.2.1?"},
+		{target: VTTarget{IP: "2001:db8::1"}, want: "GET /api/vt/enrich/ip/2001:db8::1?"},
 	} {
 		var got string
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -386,5 +389,231 @@ func TestFromEnv(t *testing.T) {
 	t.Setenv("HEIMDALL_TIMEOUT", "")
 	if c, _ := FromEnv(); c.http.Timeout != DefaultTimeout {
 		t.Errorf("default timeout %v, want %v", c.http.Timeout, DefaultTimeout)
+	}
+}
+
+const (
+	certSHA256 = "8f7a1c52e0b3d94a6c1f2e7b0d5a3c9e4b8f6a2d1c7e5b3a9f0d4c2e6b8a1f3d"
+	enrichJSON = `{"fqdn":"a.example","fetched_at":"2026-03-01T12:00:00Z","status":"partial",` +
+		`"dns":{"resolver":"9.9.9.9:53","records":[{"qtype":"A","rcode":"NOERROR","ttl":300,"rdata":["192.0.2.1"]},{"qtype":"AAAA","rcode":"NOERROR","ttl":0,"rdata":[]}]},` +
+		`"zone":{"name":"a.example","soa":["ns1.a.example. hostmaster.a.example. 2026030101 7200 3600 1209600 300"],"ns":["ana.ns.cloudflare.com","bob.ns.cloudflare.com"]},` +
+		`"rdap":{"domain":"a.example","registrar":{"name":"NameCheap, Inc.","iana_id":"1068"},"registration":"2026-02-01T00:00:00Z","expiration":"2027-02-01T00:00:00Z",` +
+		`"status":["client transfer prohibited"],"nameservers":["ana.ns.cloudflare.com","bob.ns.cloudflare.com"],"entities":[{"roles":["registrar"],"name":"NameCheap, Inc."}]},` +
+		`"ct":{"zone":"a.example","total":1,"certificates":[{"id":"7392018311","cert_sha256":"` + certSHA256 + `","issuer":"R11","not_before":"2026-02-01T00:00:00Z","not_after":"2026-05-02T00:00:00Z","revoked":false,"names":["a.example","*.a.example"]}],"names":["*.a.example","a.example"],"truncated":false},` +
+		`"subdomains":null,"errors":{"subdomains":"passive DNS: timeout"},` +
+		`"graph":{"nodes":[{"id":"d:a.example","kind":"domain","label":"a.example","watched":true,"campaign":"spynote","href":"/domains/a.example","source":"heimdall"},` +
+		`{"id":"ip:192.0.2.1","kind":"ip","label":"192.0.2.1","watched":false,"campaign":"","href":"/rdata/192.0.2.1","source":"heimdall"}],` +
+		`"edges":[{"from":"d:a.example","to":"ip:192.0.2.1","kind":"A"}],"truncated":false,"excluded_cdn":1}}`
+)
+
+func TestDomainEnrichRequests(t *testing.T) {
+	for _, tc := range []struct {
+		desc string
+		run  func(*Client) (EnrichJob, error)
+		want string
+	}{
+		{"start", func(c *Client) (EnrichJob, error) { return c.StartDomainEnrich(context.Background(), "a.example") }, "POST /api/enrich/domain/a.example"},
+		{"state", func(c *Client) (EnrichJob, error) { return c.DomainEnrichState(context.Background(), "a.example") }, "GET /api/enrich/domain/a.example"},
+	} {
+		var got string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			got = r.Method + " " + r.URL.Path
+			w.WriteHeader(http.StatusAccepted)
+			w.Write([]byte(`{"job":"domain:a.example","state":"running","started_at":"2026-03-01T12:00:00Z"}`))
+		}))
+		job, err := tc.run(New(srv.URL, "TOK"))
+		srv.Close()
+		if err != nil || got != tc.want || job.State != "running" || job.EnrichSummary != nil {
+			t.Errorf("%s: sent %q, got %+v, %v", tc.desc, got, job, err)
+		}
+	}
+}
+
+func TestEnrichJobSummary(t *testing.T) {
+	for _, tc := range []struct {
+		body    string
+		summary *EnrichSummary
+		errMsg  string
+	}{
+		{body: `{"state":"none"}`},
+		{body: `{"job":"domain:a.example","state":"running","started_at":"2026-03-01T12:00:00Z"}`},
+		{
+			body:    `{"job":"domain:a.example","state":"done","started_at":"2026-03-01T12:00:00Z","finished_at":"2026-03-01T12:00:05Z","status":"ok","counts":{"dns":4,"rdap":1,"ct":12,"subdomains":3},"summary":"ok: dns 4, rdap 1, ct 12, subdomains 3"}`,
+			summary: &EnrichSummary{Status: "ok", Counts: EnrichCounts{DNS: 4, RDAP: 1, CT: 12, Subdomains: 3}, Summary: "ok: dns 4, rdap 1, ct 12, subdomains 3"},
+		},
+		{
+			body:    `{"job":"domain:a.example","state":"failed","started_at":"2026-03-01T12:00:00Z","finished_at":"2026-03-01T12:00:05Z","status":"partial","counts":{"dns":4,"rdap":0,"ct":0,"subdomains":0},"errors":{"ct":"rate limited","rdap":"no RDAP server"},"summary":"partial: dns 4, rdap failed, ct failed, subdomains 0","error":"internal error"}`,
+			summary: &EnrichSummary{Status: "partial", Counts: EnrichCounts{DNS: 4}, Errors: map[string]string{"ct": "rate limited", "rdap": "no RDAP server"}, Summary: "partial: dns 4, rdap failed, ct failed, subdomains 0"},
+			errMsg:  "internal error",
+		},
+	} {
+		var j EnrichJob
+		if err := json.Unmarshal([]byte(tc.body), &j); err != nil {
+			t.Errorf("%s: %v", tc.body, err)
+			continue
+		}
+		if (j.EnrichSummary == nil) != (tc.summary == nil) || j.Error != tc.errMsg {
+			t.Errorf("%s: summary %+v error %q, want %+v %q", tc.body, j.EnrichSummary, j.Error, tc.summary, tc.errMsg)
+			continue
+		}
+		if s := j.EnrichSummary; s != nil {
+			if s.Status != tc.summary.Status || s.Counts != tc.summary.Counts || s.Summary != tc.summary.Summary || len(s.Errors) != len(tc.summary.Errors) {
+				t.Errorf("%s: summary %+v, want %+v", tc.body, s, tc.summary)
+			}
+			for k, v := range tc.summary.Errors {
+				if s.Errors[k] != v {
+					t.Errorf("%s: errors[%q] = %q, want %q", tc.body, k, s.Errors[k], v)
+				}
+			}
+		}
+	}
+}
+
+func TestDomainEnrichment(t *testing.T) {
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Method + " " + r.URL.Path
+		w.Write([]byte(enrichJSON))
+	}))
+	defer srv.Close()
+
+	e, err := New(srv.URL, "TOK").DomainEnrichment(context.Background(), "a.example")
+	if err != nil {
+		t.Fatalf("DomainEnrichment: %v", err)
+	}
+	if got != "GET /api/domains/a.example/enrich" {
+		t.Errorf("sent %q", got)
+	}
+	if e.FQDN != "a.example" || e.Status != "partial" || e.Subdomains != nil || e.Errors["subdomains"] != "passive DNS: timeout" {
+		t.Errorf("enrichment = %+v", e)
+	}
+	if e.DNS == nil || e.DNS.Resolver != "9.9.9.9:53" || len(e.DNS.Records) != 2 || e.DNS.Records[0].TTL != 300 || e.DNS.Records[1].Rdata == nil {
+		t.Errorf("dns = %+v", e.DNS)
+	}
+	if e.Zone == nil || e.Zone.Name != "a.example" || len(e.Zone.NS) != 2 || len(e.Zone.SOA) != 1 {
+		t.Errorf("zone = %+v", e.Zone)
+	}
+	if r := e.RDAP; r == nil || r.Registrar == nil || r.Registrar.IANAID != "1068" || r.Registration != "2026-02-01T00:00:00Z" ||
+		r.Expiration != "2027-02-01T00:00:00Z" || r.LastChanged != "" || len(r.Status) != 1 || len(r.Entities) != 1 || r.Entities[0].Roles[0] != "registrar" {
+		t.Errorf("rdap = %+v", e.RDAP)
+	}
+	if e.CT == nil || e.CT.Total != 1 || len(e.CT.Certificates) != 1 || len(e.CT.Names) != 2 {
+		t.Fatalf("ct = %+v", e.CT)
+	}
+	if c := e.CT.Certificates[0]; c.CertSHA256 != certSHA256 || c.ID != "7392018311" || c.Issuer != "R11" || c.NotAfter != "2026-05-02T00:00:00Z" || len(c.Names) != 2 {
+		t.Errorf("certificate = %+v", c)
+	}
+	if g := e.Graph; g == nil || len(g.Nodes) != 2 || len(g.Edges) != 1 || g.ExcludedCDN != 1 || !g.Nodes[0].Watched || g.Nodes[0].Campaign != "spynote" || g.Edges[0].FirstSeen != nil {
+		t.Errorf("graph = %+v", e.Graph)
+	}
+	b, _ := json.Marshal(e)
+	if !strings.Contains(string(b), `"cert_sha256":"`+certSHA256+`"`) {
+		t.Errorf("re-encoded without the whole SHA-256: %s", b)
+	}
+	if strings.Contains(string(b), "last_changed") {
+		t.Errorf("an absent RDAP date was re-encoded: %s", b)
+	}
+}
+
+func TestDomainEnrichmentNotEnriched(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	_, err := New(srv.URL, "TOK").DomainEnrichment(context.Background(), "a.example")
+	if !errors.Is(err, ErrNotEnriched) || !IsStatus(err, http.StatusNotFound) {
+		t.Errorf("err = %v, want ErrNotEnriched wrapping the 404", err)
+	}
+}
+
+func TestDomainEnrichmentNoErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"fqdn":"a.example","fetched_at":"2026-03-01T12:00:00Z","status":"ok","dns":null,"zone":null,"rdap":null,"ct":null,"subdomains":null,"errors":null,"graph":{"nodes":[],"edges":[],"truncated":false,"excluded_cdn":0}}`))
+	}))
+	defer srv.Close()
+
+	e, err := New(srv.URL, "TOK").DomainEnrichment(context.Background(), "a.example")
+	if err != nil || e.Errors == nil {
+		t.Errorf("errors = %#v, %v; want an empty, non-nil map", e.Errors, err)
+	}
+}
+
+func TestLinkDomain(t *testing.T) {
+	id := int64(2)
+	for _, tc := range []struct {
+		desc  string
+		req   LinkRequest
+		reply string
+		body  string
+	}{
+		{
+			desc:  "existing campaign",
+			req:   LinkRequest{Campaign: &id},
+			reply: `{"fqdn":"a.example","campaign":{"id":2,"name":"SpyNote"},"action":"moved","created_campaign":false}`,
+			body:  `{"campaign":2}`,
+		},
+		{
+			desc:  "new campaign",
+			req:   LinkRequest{NewCampaign: &LinkNewCampaign{Name: "spynote-2026", Description: "March wave"}},
+			reply: `{"fqdn":"a.example","campaign":{"id":4,"name":"spynote-2026"},"action":"added","created_campaign":true}`,
+			body:  `{"new_campaign":{"name":"spynote-2026","description":"March wave"}}`,
+		},
+	} {
+		var got, gotBody string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			got = r.Method + " " + r.URL.Path
+			b, _ := io.ReadAll(r.Body)
+			gotBody = string(b)
+			w.Write([]byte(tc.reply))
+		}))
+		res, err := New(srv.URL, "TOK").LinkDomain(context.Background(), "a.example", tc.req)
+		srv.Close()
+		if err != nil {
+			t.Errorf("%s: %v", tc.desc, err)
+			continue
+		}
+		if got != "POST /api/domains/a.example/link" || gotBody != tc.body {
+			t.Errorf("%s: sent %q %s, want body %s", tc.desc, got, gotBody, tc.body)
+		}
+		b, _ := json.Marshal(res)
+		if string(b) != tc.reply {
+			t.Errorf("%s: result %s, want %s", tc.desc, b, tc.reply)
+		}
+	}
+}
+
+func TestLinkDomainErrors(t *testing.T) {
+	for _, status := range []int{http.StatusBadRequest, http.StatusNotFound, http.StatusConflict} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, `{"error":"campaign exists"}`, status)
+		}))
+		_, err := New(srv.URL, "TOK").LinkDomain(context.Background(), "a.example", LinkRequest{NewCampaign: &LinkNewCampaign{Name: "x"}})
+		srv.Close()
+		if !IsStatus(err, status) || errors.Is(err, ErrNotEnriched) {
+			t.Errorf("HTTP %d: err = %v", status, err)
+		}
+	}
+}
+
+func TestNSGraph(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Write([]byte(`{"nodes":[{"id":"ns:ana.ns.cloudflare.com,bob.ns.cloudflare.com","kind":"nsset","label":"ana.ns.cloudflare.com, bob.ns.cloudflare.com","watched":false,"campaign":"","href":"","source":"heimdall"},` +
+			`{"id":"d:a.example","kind":"domain","label":"a.example","watched":true,"campaign":"spynote","href":"/domains/a.example","source":"heimdall"}],` +
+			`"edges":[{"from":"d:a.example","to":"ns:ana.ns.cloudflare.com,bob.ns.cloudflare.com","kind":"NS_SET"}],"truncated":false,"excluded_cdn":0}`))
+	}))
+	defer srv.Close()
+
+	g, err := New(srv.URL, "TOK").NSGraph(context.Background(), []string{"ana.ns.cloudflare.com", "bob.ns.cloudflare.com"})
+	if err != nil {
+		t.Fatalf("NSGraph: %v", err)
+	}
+	if gotPath != "/api/graph/ns/ana.ns.cloudflare.com,bob.ns.cloudflare.com" {
+		t.Errorf("path %q", gotPath)
+	}
+	if len(g.Nodes) != 2 || g.Nodes[1].Kind != "domain" || len(g.Edges) != 1 || g.Edges[0].Kind != "NS_SET" {
+		t.Errorf("graph = %+v", g)
 	}
 }
