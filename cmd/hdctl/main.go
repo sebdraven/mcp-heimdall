@@ -38,6 +38,7 @@ var commands = []struct {
 	{"events", "[-since 24h|7d|RFC3339] [-kind KIND] [-campaign NAME] [-limit N]", events},
 	{"campaigns", "", campaigns},
 	{"campaign-domains", "CAMPAIGN", campaignDomains},
+	{"analytics", "[-days 30|90] [-charts] CAMPAIGN", analytics},
 	{"domains", "[-enabled=true|false]", domains},
 	{"add-domains", "-campaign CAMPAIGN [-interval SECONDS] [-f FILE] [FQDN...]", addDomains},
 	{"set-domain", "[-enabled=true|false] [-interval SECONDS] [-campaign CAMPAIGN] FQDN", setDomain},
@@ -188,6 +189,17 @@ func campaignDomains(ctx context.Context, svc *service.Service, args []string) (
 		return nil, err
 	}
 	return svc.CampaignDomains(ctx, a[0])
+}
+
+func analytics(ctx context.Context, svc *service.Service, args []string) (any, error) {
+	fs := flag.NewFlagSet("analytics", flag.ExitOnError)
+	days := fs.Int("days", 0, "window in days: 30 (default) or 90")
+	charts := fs.Bool("charts", false, "print only campaign, days, header and charts")
+	a, err := parse("analytics", fs, args, 1)
+	if err != nil {
+		return nil, err
+	}
+	return svc.CampaignAnalytics(ctx, a[0], *days, *charts)
 }
 
 func domains(ctx context.Context, svc *service.Service, args []string) (any, error) {
