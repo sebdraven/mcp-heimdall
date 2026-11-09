@@ -150,7 +150,8 @@ func Register(s *mcp.Server, svc *service.Service) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "hd_vt_enrich",
 		Description: "Look up with VirusTotal the domains and IPs of the graph of a domain (depth 1 or 2, default 1) or of a campaign (id or exact, case-sensitive name), " +
-			"storing what it saw in Heimdall's cache for hd_domain and hd_vt_ip. " +
+			"or a single IP address (the names VirusTotal saw on it), storing what it saw in Heimdall's cache for hd_domain and hd_vt_ip. " +
+			"Give exactly one of domain, campaign and ip; depth applies to a domain only. " +
 			"This costs VirusTotal lookups from a daily budget shared by every Heimdall user: prefer hd_vt_budget before enriching a whole campaign. " +
 			"Objects fetched recently count as cached, private and CDN addresses are skipped, and the run stops when the budget is spent. " +
 			"With wait (default true) the job is polled every 2 s until done or failed, for at most 5 minutes, and its summary returned " +
@@ -165,6 +166,47 @@ func Register(s *mcp.Server, svc *service.Service) {
 			"The budget is shared by every Heimdall user; hd_vt_enrich spends it, no other tool does. " +
 			"An error if Heimdall has no VirusTotal configured.",
 	}, r.vtBudget)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "hd_domain_enrich",
+		Description: "Enrich one name on demand, watched or not, from four sources queried by the Heimdall server, not by this client: " +
+			"dns: its live records (one answer per qtype: rcode, TTL, rdata) from Heimdall's first active resolver, with zone, the zone found (name, SOA, NS); " +
+			"rdap: its registration through the IANA RDAP bootstrap (registrar, registration, expiration and last_changed dates, statuses, nameservers, entities); " +
+			"ct: the certificates Cert Spotter lists for the zone and below (issuer, validity, revoked, names, cert_sha256 as a full SHA-256), capped at 500; " +
+			"subdomains: the names below the zone in Heimdall's own passive DNS (first_seen, last_seen), capped at 500. " +
+			"Each source can fail alone: it is then null and its message is in errors, and status is ok, partial (some failed) or error (all failed). " +
+			"Cert Spotter without an API key on the Heimdall side is rate-limited, so ct is the source most likely to fail. " +
+			"The result is stored by Heimdall and replaces the previous one; hd_domain_enrichment reads it back without querying anything. " +
+			"With wait (default true) the job is polled every 2 s until done or failed, for at most 5 minutes, then the stored enrichment is returned with the job " +
+			"(summary: status, counts per source, errors, a one-line summary); a job still running then comes back with state running, enrichment null and a note, " +
+			"a failed job (Heimdall could not store the result) with its error and enrichment null. " +
+			"Without wait the started job comes back at once, enrichment null. Enriching a name whose enrichment is running returns that job rather than starting another. " +
+			"The graph Heimdall draws from the enrichment (addresses, CNAME and MX targets, NS set, subdomains, certificate names) is left out unless include_graph is true. " +
+			termWrite,
+	}, r.domainEnrich)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "hd_domain_enrichment",
+		Description: "The last enrichment Heimdall stored for a name (dns, zone, rdap, ct, subdomains, errors, status, fetched_at being when it ran), read only: nothing is queried. " +
+			"An error naming hd_domain_enrich when the name was never enriched. " +
+			"Certificates carry cert_sha256 as a full SHA-256. The graph is left out unless include_graph is true.",
+	}, r.domainEnrichment)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "hd_link_domain",
+		Description: "Put a name in a campaign: give either campaign (id or exact, case-sensitive name) or new_campaign_name, a campaign created first (with new_campaign_description). " +
+			"A name not watched is added to the watchlist with the default interval, its measurements starting at the collector's next cycle; a watched name is moved to the campaign. " +
+			"Returns action (added, moved or unchanged), the campaign (id, name) and created_campaign. " +
+			"A new_campaign_name already taken is an error: link with campaign instead. " + termWrite,
+	}, r.linkDomain)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "hd_ns_set",
+		Description: "The names whose current NS set (NS records seen in the last 7 days) is strictly identical to the given one, each with watched and its campaign. " +
+			"Give 2 to 16 nameservers; they are lowercased, stripped of the trailing dot, sorted and deduplicated first. " +
+			"An identical set is a strong sign of one operator: providers such as Cloudflare give each account its own nameserver pair, so the same pair means the same account. " +
+			"hd_pivots gives the NS set of a name in ns_pairs. Results may include names outside the watchlist. " + scope,
+	}, r.nsSet)
 }
 
 type pdnsInput struct {
@@ -228,13 +270,36 @@ type vtIPInput struct {
 }
 
 type vtEnrichInput struct {
-	Domain   string `json:"domain,omitempty" jsonschema:"domain name to enrich; give this or campaign"`
-	Campaign string `json:"campaign,omitempty" jsonschema:"campaign id or exact, case-sensitive name; give this or domain"`
+	Domain   string `json:"domain,omitempty" jsonschema:"domain name to enrich; give exactly one of domain, campaign and ip"`
+	Campaign string `json:"campaign,omitempty" jsonschema:"campaign id or exact, case-sensitive name; give exactly one of domain, campaign and ip"`
+	IP       string `json:"ip,omitempty" jsonschema:"IPv4 or IPv6 address to enrich; give exactly one of domain, campaign and ip"`
 	Depth    int    `json:"depth,omitempty" jsonschema:"graph depth around the domain: 1 (default) or 2; domain only"`
 	Wait     *bool  `json:"wait,omitempty" jsonschema:"poll the job until it ends, at most 5 minutes (default true)"`
 }
 
 type vtBudgetInput struct{}
+
+type domainEnrichInput struct {
+	FQDN         string `json:"fqdn" jsonschema:"domain name, watched or not"`
+	Wait         *bool  `json:"wait,omitempty" jsonschema:"poll the job until it ends, at most 5 minutes, and return the enrichment (default true)"`
+	IncludeGraph bool   `json:"include_graph,omitempty" jsonschema:"also return the graph drawn from the enrichment (default false)"`
+}
+
+type domainEnrichmentInput struct {
+	FQDN         string `json:"fqdn" jsonschema:"domain name"`
+	IncludeGraph bool   `json:"include_graph,omitempty" jsonschema:"also return the graph drawn from the enrichment (default false)"`
+}
+
+type linkDomainInput struct {
+	FQDN                   string `json:"fqdn" jsonschema:"domain name, watched or not"`
+	Campaign               string `json:"campaign,omitempty" jsonschema:"campaign id or exact, case-sensitive name; give this or new_campaign_name"`
+	NewCampaignName        string `json:"new_campaign_name,omitempty" jsonschema:"name of a campaign to create; give this or campaign"`
+	NewCampaignDescription string `json:"new_campaign_description,omitempty" jsonschema:"free text, with new_campaign_name only"`
+}
+
+type nsSetInput struct {
+	NS []string `json:"ns" jsonschema:"2 to 16 nameserver names, e.g. ana.ns.cloudflare.com and bob.ns.cloudflare.com"`
+}
 
 func (r *registry) pdnsQuery(ctx context.Context, _ *mcp.CallToolRequest, in pdnsInput) (*mcp.CallToolResult, service.PDNSResult, error) {
 	res, err := r.svc.PDNSQuery(ctx, in.RRName, in.Limit)
@@ -297,11 +362,31 @@ func (r *registry) vtIP(ctx context.Context, _ *mcp.CallToolRequest, in vtIPInpu
 }
 
 func (r *registry) vtEnrich(ctx context.Context, _ *mcp.CallToolRequest, in vtEnrichInput) (*mcp.CallToolResult, service.VTEnrichResult, error) {
-	res, err := r.svc.VTEnrich(ctx, in.Domain, in.Campaign, in.Depth, in.Wait == nil || *in.Wait)
+	res, err := r.svc.VTEnrichRequest(ctx, service.VTRequest{Domain: in.Domain, Campaign: in.Campaign, IP: in.IP, Depth: in.Depth}, in.Wait == nil || *in.Wait)
 	return nil, res, err
 }
 
 func (r *registry) vtBudget(ctx context.Context, _ *mcp.CallToolRequest, _ vtBudgetInput) (*mcp.CallToolResult, service.VTBudgetResult, error) {
 	res, err := r.svc.VTBudget(ctx)
+	return nil, res, err
+}
+
+func (r *registry) domainEnrich(ctx context.Context, _ *mcp.CallToolRequest, in domainEnrichInput) (*mcp.CallToolResult, service.DomainEnrichResult, error) {
+	res, err := r.svc.DomainEnrich(ctx, in.FQDN, in.Wait == nil || *in.Wait, in.IncludeGraph)
+	return nil, res, err
+}
+
+func (r *registry) domainEnrichment(ctx context.Context, _ *mcp.CallToolRequest, in domainEnrichmentInput) (*mcp.CallToolResult, service.DomainEnrichmentResult, error) {
+	res, err := r.svc.DomainEnrichment(ctx, in.FQDN, in.IncludeGraph)
+	return nil, res, err
+}
+
+func (r *registry) linkDomain(ctx context.Context, _ *mcp.CallToolRequest, in linkDomainInput) (*mcp.CallToolResult, heimdall.LinkResult, error) {
+	res, err := r.svc.LinkDomain(ctx, in.FQDN, in.Campaign, in.NewCampaignName, in.NewCampaignDescription)
+	return nil, res, err
+}
+
+func (r *registry) nsSet(ctx context.Context, _ *mcp.CallToolRequest, in nsSetInput) (*mcp.CallToolResult, service.NSSetResult, error) {
+	res, err := r.svc.NSSet(ctx, in.NS)
 	return nil, res, err
 }

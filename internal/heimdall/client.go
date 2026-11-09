@@ -158,11 +158,183 @@ type VTJob struct {
 	*VTSummary
 }
 
-// VTTarget is what an enrichment covers: FQDN to Depth, or else Campaign.
+// VTTarget is what an enrichment covers: FQDN to Depth, or else IP, or else
+// Campaign.
 type VTTarget struct {
 	FQDN     string
 	Depth    int
+	IP       string
 	Campaign int64
+}
+
+// ErrNotEnriched is the 404 of a name never enriched.
+var ErrNotEnriched = errors.New("not enriched yet")
+
+type EnrichCounts struct {
+	DNS        int `json:"dns"`
+	RDAP       int `json:"rdap"`
+	CT         int `json:"ct"`
+	Subdomains int `json:"subdomains"`
+}
+
+// EnrichSummary ends a domain enrichment; Errors maps a failed source to its
+// message.
+type EnrichSummary struct {
+	Status  string            `json:"status"`
+	Counts  EnrichCounts      `json:"counts"`
+	Errors  map[string]string `json:"errors,omitempty"`
+	Summary string            `json:"summary"`
+}
+
+// EnrichJob is the state of a domain enrichment: running, done, failed, or
+// none. EnrichSummary is nil until it has finished.
+type EnrichJob struct {
+	Job        string  `json:"job"`
+	State      string  `json:"state"`
+	StartedAt  *string `json:"started_at"`
+	FinishedAt *string `json:"finished_at"`
+	Error      string  `json:"error"`
+	*EnrichSummary
+}
+
+type DNSRecord struct {
+	QType string   `json:"qtype"`
+	Rcode string   `json:"rcode"`
+	TTL   uint32   `json:"ttl"`
+	Rdata []string `json:"rdata"`
+}
+
+// LiveDNS is the answer of Resolver to each qtype.
+type LiveDNS struct {
+	Resolver string      `json:"resolver"`
+	Records  []DNSRecord `json:"records"`
+}
+
+type Zone struct {
+	Name string   `json:"name"`
+	SOA  []string `json:"soa"`
+	NS   []string `json:"ns"`
+}
+
+type Registrar struct {
+	Name   string `json:"name"`
+	IANAID string `json:"iana_id"`
+}
+
+type RDAPEntity struct {
+	Roles []string `json:"roles"`
+	Name  string   `json:"name"`
+}
+
+// RDAP dates are absent when the registry gave none.
+type RDAP struct {
+	Domain       string       `json:"domain"`
+	Registrar    *Registrar   `json:"registrar"`
+	Registration string       `json:"registration,omitempty"`
+	Expiration   string       `json:"expiration,omitempty"`
+	LastChanged  string       `json:"last_changed,omitempty"`
+	Status       []string     `json:"status"`
+	Nameservers  []string     `json:"nameservers"`
+	Entities     []RDAPEntity `json:"entities"`
+}
+
+type Certificate struct {
+	ID         string   `json:"id"`
+	CertSHA256 string   `json:"cert_sha256"`
+	Issuer     string   `json:"issuer"`
+	NotBefore  string   `json:"not_before"`
+	NotAfter   string   `json:"not_after"`
+	Revoked    bool     `json:"revoked"`
+	Names      []string `json:"names"`
+}
+
+// CT holds the Cert Spotter issuances for Zone and below; Names is the union
+// of their names.
+type CT struct {
+	Zone         string        `json:"zone"`
+	Total        int           `json:"total"`
+	Certificates []Certificate `json:"certificates"`
+	Names        []string      `json:"names"`
+	Truncated    bool          `json:"truncated"`
+}
+
+type Subdomain struct {
+	Name      string `json:"name"`
+	FirstSeen string `json:"first_seen"`
+	LastSeen  string `json:"last_seen"`
+}
+
+type Subdomains struct {
+	Zone      string      `json:"zone"`
+	Names     []Subdomain `json:"names"`
+	Truncated bool        `json:"truncated"`
+}
+
+type GraphNode struct {
+	ID       string `json:"id"`
+	Kind     string `json:"kind"`
+	Label    string `json:"label"`
+	Watched  bool   `json:"watched"`
+	Campaign string `json:"campaign"`
+	Href     string `json:"href"`
+	Source   string `json:"source"`
+}
+
+// GraphEdge has FirstSeen and LastSeen for a VirusTotal edge only.
+type GraphEdge struct {
+	From      string  `json:"from"`
+	To        string  `json:"to"`
+	Kind      string  `json:"kind"`
+	FirstSeen *string `json:"first_seen,omitempty"`
+	LastSeen  *string `json:"last_seen,omitempty"`
+}
+
+// Graph is a Heimdall graph; ExcludedCDN counts the CDN addresses left out.
+type Graph struct {
+	Nodes       []GraphNode `json:"nodes"`
+	Edges       []GraphEdge `json:"edges"`
+	Truncated   bool        `json:"truncated"`
+	ExcludedCDN int         `json:"excluded_cdn"`
+}
+
+// DomainEnrichment is the last enrichment of a name. A source that failed is
+// nil, its message in Errors.
+type DomainEnrichment struct {
+	FQDN       string            `json:"fqdn"`
+	FetchedAt  string            `json:"fetched_at"`
+	Status     string            `json:"status"`
+	DNS        *LiveDNS          `json:"dns"`
+	Zone       *Zone             `json:"zone"`
+	RDAP       *RDAP             `json:"rdap"`
+	CT         *CT               `json:"ct"`
+	Subdomains *Subdomains       `json:"subdomains"`
+	Errors     map[string]string `json:"errors"`
+	Graph      *Graph            `json:"graph,omitempty"`
+}
+
+// LinkRequest names exactly one of Campaign and NewCampaign.
+type LinkRequest struct {
+	Campaign    *int64           `json:"campaign,omitempty"`
+	NewCampaign *LinkNewCampaign `json:"new_campaign,omitempty"`
+}
+
+type LinkNewCampaign struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+type CampaignRef struct {
+	ID   int64  `json:"id"`
+	Name string `json:"name"`
+}
+
+// LinkResult tells whether the name was added to the watchlist, moved to the
+// campaign or already in it.
+type LinkResult struct {
+	FQDN            string      `json:"fqdn"`
+	Campaign        CampaignRef `json:"campaign"`
+	Action          string      `json:"action"`
+	CreatedCampaign bool        `json:"created_campaign"`
 }
 
 // Event is one entry of the event stream. Detail is decoded with UseNumber, so
@@ -508,8 +680,11 @@ func (c *Client) VTBudget(ctx context.Context) (VTBudget, error) {
 }
 
 func (t VTTarget) path() string {
-	if t.FQDN != "" {
+	switch {
+	case t.FQDN != "":
 		return "/api/vt/enrich/domain/" + url.PathEscape(t.FQDN)
+	case t.IP != "":
+		return "/api/vt/enrich/ip/" + url.PathEscape(t.IP)
 	}
 	return "/api/vt/enrich/campaign/" + strconv.FormatInt(t.Campaign, 10)
 }
@@ -525,4 +700,41 @@ func (c *Client) StartVTEnrich(ctx context.Context, t VTTarget) (VTJob, error) {
 
 func (c *Client) VTEnrichState(ctx context.Context, t VTTarget) (VTJob, error) {
 	return call[VTJob](ctx, c, http.MethodGet, t.path(), nil, nil)
+}
+
+// StartDomainEnrich starts enriching fqdn, or returns the job already running
+// on it.
+func (c *Client) StartDomainEnrich(ctx context.Context, fqdn string) (EnrichJob, error) {
+	return call[EnrichJob](ctx, c, http.MethodPost, "/api/enrich/domain/"+url.PathEscape(fqdn), nil, nil)
+}
+
+func (c *Client) DomainEnrichState(ctx context.Context, fqdn string) (EnrichJob, error) {
+	return call[EnrichJob](ctx, c, http.MethodGet, "/api/enrich/domain/"+url.PathEscape(fqdn), nil, nil)
+}
+
+// DomainEnrichment returns the last enrichment of fqdn with its graph, an
+// error wrapping ErrNotEnriched before the first one.
+func (c *Client) DomainEnrichment(ctx context.Context, fqdn string) (DomainEnrichment, error) {
+	e, err := call[DomainEnrichment](ctx, c, http.MethodGet, "/api/domains/"+url.PathEscape(fqdn)+"/enrich", nil, nil)
+	if IsStatus(err, http.StatusNotFound) {
+		return e, fmt.Errorf("%s: %w: %w", fqdn, ErrNotEnriched, err)
+	}
+	if err == nil && e.Errors == nil {
+		e.Errors = map[string]string{}
+	}
+	return e, err
+}
+
+// LinkDomain adds fqdn to the watchlist in a campaign, or moves it there.
+func (c *Client) LinkDomain(ctx context.Context, fqdn string, r LinkRequest) (LinkResult, error) {
+	return call[LinkResult](ctx, c, http.MethodPost, "/api/domains/"+url.PathEscape(fqdn)+"/link", nil, r)
+}
+
+// NSGraph returns the names whose current NS set is exactly ns.
+func (c *Client) NSGraph(ctx context.Context, ns []string) (Graph, error) {
+	parts := make([]string, len(ns))
+	for i, n := range ns {
+		parts[i] = url.PathEscape(n)
+	}
+	return call[Graph](ctx, c, http.MethodGet, "/api/graph/ns/"+strings.Join(parts, ","), nil, nil)
 }

@@ -5,8 +5,11 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/netip"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -25,21 +28,27 @@ const (
 	vtRows      = 500
 )
 
-// VTEnrich polls a job every vtPollInterval for at most vtWaitLimit.
+// A waited job is polled every pollInterval for at most waitLimit.
 const (
-	vtPollInterval = 2 * time.Second
-	vtWaitLimit    = 5 * time.Minute
+	pollInterval = 2 * time.Second
+	waitLimit    = 5 * time.Minute
+)
+
+// An NS set has minNSSet to maxNSSet nameservers.
+const (
+	minNSSet = 2
+	maxNSSet = 16
 )
 
 type Service struct {
-	client *heimdall.Client
-	now    func() time.Time
-	vtPoll time.Duration
-	vtWait time.Duration
+	client  *heimdall.Client
+	now     func() time.Time
+	poll    time.Duration
+	maxWait time.Duration
 }
 
 func New(c *heimdall.Client) *Service {
-	return &Service{client: c, now: time.Now, vtPoll: vtPollInterval, vtWait: vtWaitLimit}
+	return &Service{client: c, now: time.Now, poll: pollInterval, maxWait: waitLimit}
 }
 
 type PDNSResult struct {
@@ -128,6 +137,7 @@ type VTBudgetResult struct {
 type VTEnrichResult struct {
 	Domain     string              `json:"domain,omitempty"`
 	Depth      int                 `json:"depth,omitempty"`
+	IP         string              `json:"ip,omitempty"`
 	Campaign   *heimdall.Campaign  `json:"campaign,omitempty"`
 	FetchedAt  string              `json:"fetched_at"`
 	State      string              `json:"state"`
@@ -136,6 +146,51 @@ type VTEnrichResult struct {
 	Summary    *heimdall.VTSummary `json:"summary"`
 	Error      string              `json:"error,omitempty"`
 	Note       string              `json:"note,omitempty"`
+}
+
+// VTRequest names what an enrichment covers: exactly one of Domain, Campaign
+// and IP. Depth applies to Domain only.
+type VTRequest struct {
+	Domain   string
+	Campaign string
+	IP       string
+	Depth    int
+}
+
+// DomainEnrichResult is the job of a domain enrichment and, once done, the
+// stored enrichment.
+type DomainEnrichResult struct {
+	FQDN       string                     `json:"fqdn"`
+	FetchedAt  string                     `json:"fetched_at"`
+	State      string                     `json:"state"`
+	StartedAt  *string                    `json:"started_at"`
+	FinishedAt *string                    `json:"finished_at"`
+	Summary    *heimdall.EnrichSummary    `json:"summary"`
+	Error      string                     `json:"error,omitempty"`
+	Enrichment *heimdall.DomainEnrichment `json:"enrichment"`
+	Note       string                     `json:"note,omitempty"`
+}
+
+type DomainEnrichmentResult struct {
+	FQDN       string                     `json:"fqdn"`
+	FetchedAt  string                     `json:"fetched_at"`
+	Enrichment *heimdall.DomainEnrichment `json:"enrichment"`
+}
+
+type NSSetDomain struct {
+	FQDN     string `json:"fqdn"`
+	Watched  bool   `json:"watched"`
+	Campaign string `json:"campaign"`
+}
+
+// NSSetResult lists the names whose current NS set is exactly NS.
+type NSSetResult struct {
+	NS        []string      `json:"ns"`
+	FetchedAt string        `json:"fetched_at"`
+	Returned  int           `json:"returned"`
+	Domains   []NSSetDomain `json:"domains"`
+	Truncated bool          `json:"truncated"`
+	Note      string        `json:"note,omitempty"`
 }
 
 func (s *Service) stamp() string { return s.now().UTC().Format(time.RFC3339) }
@@ -452,15 +507,27 @@ func (s *Service) VTBudget(ctx context.Context) (VTBudgetResult, error) {
 }
 
 // VTEnrich enriches a domain to depth (1 or 2, default 1) or a campaign (id
-// or exact name). With wait it polls the job until it ends or vtWait has
+// or exact name). With wait it polls the job until it ends or maxWait has
 // passed; a job still running then is no error.
 func (s *Service) VTEnrich(ctx context.Context, domain, campaign string, depth int, wait bool) (VTEnrichResult, error) {
-	domain, campaign = strings.TrimSpace(domain), strings.TrimSpace(campaign)
+	return s.VTEnrichRequest(ctx, VTRequest{Domain: domain, Campaign: campaign, Depth: depth}, wait)
+}
+
+// VTEnrichRequest is VTEnrich for a domain, a campaign or an IP.
+func (s *Service) VTEnrichRequest(ctx context.Context, r VTRequest, wait bool) (VTEnrichResult, error) {
+	domain, campaign, ip := strings.TrimSpace(r.Domain), strings.TrimSpace(r.Campaign), strings.TrimSpace(r.IP)
+	depth := r.Depth
 	var res VTEnrichResult
 	var t heimdall.VTTarget
+	given := 0
+	for _, v := range []string{domain, campaign, ip} {
+		if v != "" {
+			given++
+		}
+	}
 	switch {
-	case (domain == "") == (campaign == ""):
-		return res, fmt.Errorf("give either a domain or a campaign")
+	case given != 1:
+		return res, fmt.Errorf("give either a domain, a campaign or an ip")
 	case domain != "":
 		if depth == 0 {
 			depth = 1
@@ -470,10 +537,16 @@ func (s *Service) VTEnrich(ctx context.Context, domain, campaign string, depth i
 		}
 		t = heimdall.VTTarget{FQDN: domain, Depth: depth}
 		res.Domain, res.Depth = domain, depth
-	default:
-		if depth != 0 {
-			return res, fmt.Errorf("depth applies to a domain only")
+	case depth != 0:
+		return res, fmt.Errorf("depth applies to a domain only")
+	case ip != "":
+		a, err := netip.ParseAddr(ip)
+		if err != nil {
+			return res, fmt.Errorf("ip %q: not an IP address", ip)
 		}
+		t = heimdall.VTTarget{IP: a.String()}
+		res.IP = t.IP
+	default:
 		c, err := s.ResolveCampaign(ctx, campaign)
 		if err != nil {
 			return res, err
@@ -488,11 +561,13 @@ func (s *Service) VTEnrich(ctx context.Context, domain, campaign string, depth i
 	}
 	if wait {
 		var timedOut bool
-		if job, timedOut, err = s.waitVT(ctx, t, job); err != nil {
+		job, timedOut, err = await(ctx, s, job, func(j heimdall.VTJob) string { return j.State },
+			func(ctx context.Context) (heimdall.VTJob, error) { return s.client.VTEnrichState(ctx, t) })
+		if err != nil {
 			return res, vtErr(err)
 		}
 		if timedOut {
-			res.Note = fmt.Sprintf("still running after %s; enriching the same target while it runs returns this job without starting another", s.vtWait)
+			res.Note = fmt.Sprintf("still running after %s; enriching the same target while it runs returns this job without starting another", s.maxWait)
 		}
 	}
 	res.FetchedAt, res.State, res.Error = s.stamp(), job.State, job.Error
@@ -500,14 +575,14 @@ func (s *Service) VTEnrich(ctx context.Context, domain, campaign string, depth i
 	return res, nil
 }
 
-// waitVT polls the job of t while it runs, for at most vtWait; the bool
-// reports a job still running then.
-func (s *Service) waitVT(ctx context.Context, t heimdall.VTTarget, job heimdall.VTJob) (heimdall.VTJob, bool, error) {
-	limit := time.NewTimer(s.vtWait)
+// await polls next while state reports a running job, every s.poll for at
+// most s.maxWait; the bool reports a job still running then.
+func await[J any](ctx context.Context, s *Service, job J, state func(J) string, next func(context.Context) (J, error)) (J, bool, error) {
+	limit := time.NewTimer(s.maxWait)
 	defer limit.Stop()
-	tick := time.NewTicker(s.vtPoll)
+	tick := time.NewTicker(s.poll)
 	defer tick.Stop()
-	for job.State == "running" {
+	for state(job) == "running" {
 		select {
 		case <-ctx.Done():
 			return job, false, ctx.Err()
@@ -515,11 +590,161 @@ func (s *Service) waitVT(ctx context.Context, t heimdall.VTTarget, job heimdall.
 			return job, true, nil
 		case <-tick.C:
 		}
-		next, err := s.client.VTEnrichState(ctx, t)
+		n, err := next(ctx)
 		if err != nil {
 			return job, false, err
 		}
-		job = next
+		job = n
 	}
 	return job, false, nil
+}
+
+// normalizeFQDN lowercases v and drops its trailing dot; it wants at least two
+// labels of letters, digits, '-' and '_'.
+func normalizeFQDN(v string) (string, error) {
+	n := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(v)), ".")
+	if n == "" {
+		return "", fmt.Errorf("fqdn is required")
+	}
+	labels := strings.Split(n, ".")
+	ok := len(n) <= 253 && len(labels) >= 2
+	for _, l := range labels {
+		ok = ok && l != "" && len(l) <= 63
+		for _, c := range l {
+			ok = ok && (c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '_')
+		}
+	}
+	if !ok {
+		return "", fmt.Errorf("invalid fqdn %q", v)
+	}
+	return n, nil
+}
+
+// enrichment drops the graph of e unless asked for.
+func enrichment(e heimdall.DomainEnrichment, includeGraph bool) *heimdall.DomainEnrichment {
+	if !includeGraph {
+		e.Graph = nil
+	}
+	return &e
+}
+
+func notEnrichedErr(err error) error {
+	if errors.Is(err, heimdall.ErrNotEnriched) {
+		return fmt.Errorf("not enriched yet, run hd_domain_enrich: %w", err)
+	}
+	return err
+}
+
+// DomainEnrich enriches fqdn. With wait it polls the job like VTEnrich and,
+// once done, reads the stored enrichment back; a job still running then
+// comes back with a note and no enrichment.
+func (s *Service) DomainEnrich(ctx context.Context, fqdn string, wait, includeGraph bool) (DomainEnrichResult, error) {
+	fqdn, err := normalizeFQDN(fqdn)
+	if err != nil {
+		return DomainEnrichResult{}, err
+	}
+	res := DomainEnrichResult{FQDN: fqdn}
+	job, err := s.client.StartDomainEnrich(ctx, fqdn)
+	if err != nil {
+		return res, err
+	}
+	if wait {
+		var timedOut bool
+		job, timedOut, err = await(ctx, s, job, func(j heimdall.EnrichJob) string { return j.State },
+			func(ctx context.Context) (heimdall.EnrichJob, error) { return s.client.DomainEnrichState(ctx, fqdn) })
+		if err != nil {
+			return res, err
+		}
+		if timedOut {
+			res.Note = fmt.Sprintf("still running after %s; enriching the same name while it runs returns this job without starting another, and hd_domain_enrichment reads the result once done", s.maxWait)
+		}
+	}
+	if job.State == "done" {
+		e, err := s.client.DomainEnrichment(ctx, fqdn)
+		if err != nil {
+			return res, notEnrichedErr(err)
+		}
+		res.Enrichment = enrichment(e, includeGraph)
+	}
+	res.FetchedAt, res.State, res.Error = s.stamp(), job.State, job.Error
+	res.StartedAt, res.FinishedAt, res.Summary = job.StartedAt, job.FinishedAt, job.EnrichSummary
+	return res, nil
+}
+
+// DomainEnrichment reads the last enrichment of fqdn.
+func (s *Service) DomainEnrichment(ctx context.Context, fqdn string, includeGraph bool) (DomainEnrichmentResult, error) {
+	fqdn, err := normalizeFQDN(fqdn)
+	if err != nil {
+		return DomainEnrichmentResult{}, err
+	}
+	e, err := s.client.DomainEnrichment(ctx, fqdn)
+	if err != nil {
+		return DomainEnrichmentResult{}, notEnrichedErr(err)
+	}
+	return DomainEnrichmentResult{FQDN: fqdn, FetchedAt: s.stamp(), Enrichment: enrichment(e, includeGraph)}, nil
+}
+
+// LinkDomain puts fqdn in a campaign, given exactly one of campaign (id or
+// exact name) and newName, the name of a campaign to create.
+func (s *Service) LinkDomain(ctx context.Context, fqdn, campaign, newName, newDescription string) (heimdall.LinkResult, error) {
+	fqdn, err := normalizeFQDN(fqdn)
+	if err != nil {
+		return heimdall.LinkResult{}, err
+	}
+	campaign, newName, newDescription = strings.TrimSpace(campaign), strings.TrimSpace(newName), strings.TrimSpace(newDescription)
+	var req heimdall.LinkRequest
+	switch {
+	case (campaign == "") == (newName == ""):
+		return heimdall.LinkResult{}, fmt.Errorf("give either a campaign or a new campaign name")
+	case newName != "":
+		req.NewCampaign = &heimdall.LinkNewCampaign{Name: newName, Description: newDescription}
+	case newDescription != "":
+		return heimdall.LinkResult{}, fmt.Errorf("a description applies to a new campaign only")
+	default:
+		c, err := s.ResolveCampaign(ctx, campaign)
+		if err != nil {
+			return heimdall.LinkResult{}, err
+		}
+		req.Campaign = &c.ID
+	}
+	res, err := s.client.LinkDomain(ctx, fqdn, req)
+	if heimdall.IsStatus(err, http.StatusConflict) {
+		return res, fmt.Errorf("campaign %q already exists, link to it with campaign: %w", newName, err)
+	}
+	return res, err
+}
+
+// NSSet lists the names whose current NS set is exactly ns, normalized,
+// sorted and unique first.
+func (s *Service) NSSet(ctx context.Context, ns []string) (NSSetResult, error) {
+	set := make([]string, 0, len(ns))
+	for _, n := range ns {
+		if strings.TrimSpace(n) == "" {
+			continue
+		}
+		name, err := normalizeFQDN(n)
+		if err != nil {
+			return NSSetResult{}, fmt.Errorf("nameserver: %w", err)
+		}
+		set = append(set, name)
+	}
+	set = slices.Compact(slices.Sorted(slices.Values(set)))
+	if len(set) < minNSSet || len(set) > maxNSSet {
+		return NSSetResult{}, fmt.Errorf("an NS set has %d to %d distinct nameservers, got %d", minNSSet, maxNSSet, len(set))
+	}
+	g, err := s.client.NSGraph(ctx, set)
+	if err != nil {
+		return NSSetResult{}, err
+	}
+	res := NSSetResult{NS: set, FetchedAt: s.stamp(), Domains: []NSSetDomain{}, Truncated: g.Truncated}
+	for _, n := range g.Nodes {
+		if n.Kind == "domain" {
+			res.Domains = append(res.Domains, NSSetDomain{FQDN: n.Label, Watched: n.Watched, Campaign: n.Campaign})
+		}
+	}
+	res.Returned = len(res.Domains)
+	if g.Truncated {
+		res.Note = fmt.Sprintf("%d names, Heimdall's graph cap: more may exist.", res.Returned)
+	}
+	return res, nil
 }

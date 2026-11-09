@@ -16,7 +16,15 @@ heimdall-cli token create --username alice --label mcp
 ```
 
 The token inherits the role of its user: `viewer` reads, `analyst` can also add
-and change domains and run VirusTotal enrichments.
+and change domains and run enrichments.
+
+`hd_domain_enrich`, `hd_domain_enrichment`, `hd_link_domain`, `hd_ns_set` and
+`hd_vt_enrich` with `ip` need a Heimdall at or after
+[sebdraven/heimdall#16](https://github.com/sebdraven/heimdall/pull/16)
+(commit `1c2454d`, "Domain enrichment and link to campaign"), which serves
+`/api/enrich/domain`, `/api/domains/{fqdn}/enrich`, `/api/domains/{fqdn}/link`,
+`/api/graph/ns/{set}` and `/api/vt/enrich/ip/{ip}`. Against an older one they
+fail with its 404.
 
 ## Tools
 
@@ -34,12 +42,16 @@ and change domains and run VirusTotal enrichments.
 | `hd_add_domains` | add domains to a campaign; reports added, already present and failed |
 | `hd_set_domain` | enable, disable, re-time or move one domain |
 | `hd_vt_ip` | which names VirusTotal saw on an IP, from Heimdall's cache, each `watched` or not with its campaign |
-| `hd_vt_enrich` | look up with VirusTotal the graph of a domain (depth 1 or 2) or of a campaign; spends the daily budget |
+| `hd_vt_enrich` | look up with VirusTotal the graph of a domain (depth 1 or 2), of a campaign, or one IP; spends the daily budget |
 | `hd_vt_budget` | the VirusTotal lookups of the UTC day: budget, used, remaining |
+| `hd_domain_enrich` | enrich one name now: live DNS and zone, RDAP, Cert Spotter certificates, subdomains from passive DNS; stored by Heimdall |
+| `hd_domain_enrichment` | the last stored enrichment of a name, read only |
+| `hd_link_domain` | put a name in a campaign, existing or created on the way: added to the watchlist, moved, or unchanged |
+| `hd_ns_set` | which names have exactly this NS set (2 to 16 nameservers) |
 
 There is no deletion: disabling a domain stops measurement and keeps its
-history. Write tools and `hd_vt_enrich` need an `analyst` token; with a
-`viewer` token Heimdall's 403 comes back as is.
+history. Write tools, `hd_vt_enrich`, `hd_domain_enrich` and `hd_link_domain`
+need an `analyst` token; with a `viewer` token Heimdall's 403 comes back as is.
 
 Results are compact JSON, untruncated.
 
@@ -64,6 +76,46 @@ otherwise.
 
 Against an older Heimdall, `excluded_cdn` is empty and `ns_pairs` is `null`.
 
+`hd_ns_set` takes an NS set directly, for instance the `ns` of an `ns_pairs`
+or of an enrichment's `zone`: the nameservers are lowercased, stripped of the
+trailing dot, sorted and deduplicated, and there must be 2 to 16 of them. It
+returns the names whose current NS set (last 7 days) is strictly identical,
+each with `watched` and `campaign`.
+
+### Domain enrichment
+
+`hd_domain_enrich` has the Heimdall server, not this client, query four
+sources about one name, watched or not:
+
+- `dns`: the live records of the name, one answer per qtype, from Heimdall's
+  first active resolver, and `zone`: the zone found, with its SOA and NS;
+- `rdap`: the registration, through the IANA RDAP bootstrap: registrar,
+  `registration`, `expiration` and `last_changed` (absent when the registry
+  gives none), statuses, nameservers, entities;
+- `ct`: the certificates Cert Spotter lists for the zone and below, each with
+  its full `cert_sha256`, capped at 500. Without a Cert Spotter key on the
+  Heimdall side the public API is rate-limited;
+- `subdomains`: the names below the zone in Heimdall's passive DNS, capped at
+  500.
+
+Each source can fail alone: it is then `null` and its message is in `errors`,
+and `status` is `ok`, `partial` or `error`. The result is stored by Heimdall
+and replaces the previous one. With `wait` (the default) the job is polled
+every 2 seconds, for at most 5 minutes, and the stored enrichment comes back
+with the job's `summary`; a job still running then comes back with
+`"state": "running"`, `enrichment` `null` and a note. `hd_domain_enrichment`
+reads the stored result without querying anything, and fails with a message
+naming `hd_domain_enrich` when the name was never enriched.
+
+Both leave out the graph Heimdall draws from the enrichment unless
+`include_graph` is true.
+
+`hd_link_domain` takes either `campaign` (id or exact name) or
+`new_campaign_name` (with `new_campaign_description`), created first. A name
+not watched is added with the default interval and is measured from the
+collector's next cycle; a watched one is moved. `action` is `added`, `moved`
+or `unchanged`.
+
 ### VirusTotal
 
 A Heimdall configured with a VirusTotal key caches what VirusTotal saw: the
@@ -86,7 +138,9 @@ another source than Heimdall's own measurements.
   minutes, and returns its `summary` (`looked_up`, `cached`, `skipped_budget`,
   `skipped_cdn`, `skipped_reserved`, `stopped_reason`); a job still running
   then comes back with `"state": "running"`, `summary` `null` and a note.
-  Enriching a target already being enriched returns the running job.
+  Enriching a target already being enriched returns the running job. With
+  `ip` instead of `domain` or `campaign` it looks up the names VirusTotal saw
+  on that address, which `hd_vt_ip` then lists.
 - `hd_vt_budget` returns `budget`, `used_today` and `remaining` for the UTC
   day.
 
@@ -146,13 +200,20 @@ hdctl set-domain -campaign '' www.example.com
 hdctl vt-ip 192.0.2.1
 hdctl vt-enrich -depth 2 www.example.com
 hdctl vt-enrich -campaign spynote-2026 -wait=false
+hdctl vt-enrich -ip 192.0.2.1
 hdctl vt-budget
+hdctl enrich www.example.com
+hdctl enrich -no-wait -graph www.example.com
+hdctl enrichment -graph www.example.com
+hdctl link -campaign spynote-2026 www.example.com
+hdctl link -new spynote-2027 -desc 'January wave' www.example.com
+hdctl ns-set ana.ns.cloudflare.com,bob.ns.cloudflare.com
 ```
 
 `pivots` prints `excluded_cdn` and `ns_pairs` next to `pivots`.
 `add-domains` reads `-f` one domain per line, `#` starting a comment, `-` for
 stdin, and defaults to a 43200-second (12-hour) interval. It exits 1 if any
-domain failed. `vt-enrich` exits 1 if the enrichment failed.
+domain failed. `vt-enrich` and `enrich` exit 1 if the enrichment failed.
 
 ## Terms
 

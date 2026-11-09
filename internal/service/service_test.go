@@ -4,8 +4,13 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -389,6 +394,7 @@ func TestVTEnrich(t *testing.T) {
 		desc     string
 		domain   string
 		campaign string
+		ip       string
 		depth    int
 		wait     bool
 		status   int
@@ -460,6 +466,21 @@ func TestVTEnrich(t *testing.T) {
 		{desc: "neither", wantErr: "either"},
 		{desc: "depth 3", domain: "a.example", depth: 3, wantErr: "depth must be 1 or 2"},
 		{desc: "depth on a campaign", campaign: "spynote", depth: 2, wantErr: "domain only"},
+		{
+			desc:     "ip, wait until done",
+			ip:       " 2001:DB8::1 ",
+			wait:     true,
+			post:     jobRunning,
+			gets:     []string{jobDone},
+			wantReqs: "POST /api/vt/enrich/ip/2001:db8::1, GET /api/vt/enrich/ip/2001:db8::1",
+			state:    "done",
+			summary:  true,
+		},
+		{desc: "ip, no wait", ip: "192.0.2.1", post: jobRunning, wantReqs: "POST /api/vt/enrich/ip/192.0.2.1", state: "running"},
+		{desc: "depth on an ip", ip: "192.0.2.1", depth: 2, wantErr: "domain only"},
+		{desc: "invalid ip", ip: "192.0.2", wantErr: "not an IP address"},
+		{desc: "domain and ip", domain: "a.example", ip: "192.0.2.1", wantErr: "either"},
+		{desc: "campaign and ip", campaign: "spynote", ip: "192.0.2.1", wantErr: "either"},
 	} {
 		gets := 0
 		var gotQuery string
@@ -473,8 +494,8 @@ func TestVTEnrich(t *testing.T) {
 			w.Write([]byte(tc.gets[min(gets, len(tc.gets)-1)]))
 			gets++
 		})
-		s.vtPoll, s.vtWait = time.Millisecond, cmp.Or(tc.waitFor, 5*time.Second)
-		res, err := s.VTEnrich(context.Background(), tc.domain, tc.campaign, tc.depth, tc.wait)
+		s.poll, s.maxWait = time.Millisecond, cmp.Or(tc.waitFor, 5*time.Second)
+		res, err := s.VTEnrichRequest(context.Background(), VTRequest{Domain: tc.domain, Campaign: tc.campaign, IP: tc.ip, Depth: tc.depth}, tc.wait)
 		// The polls of a wait that ran out are not counted.
 		if got := strings.Join(*reqs, ", "); tc.waitFor == 0 && got != tc.wantReqs {
 			t.Errorf("%s: requests = %q, want %q", tc.desc, got, tc.wantReqs)
@@ -500,6 +521,358 @@ func TestVTEnrich(t *testing.T) {
 		}
 		if (tc.note == "") != (res.Note == "") || !strings.Contains(res.Note, tc.note) {
 			t.Errorf("%s: note %q, want one mentioning %q", tc.desc, res.Note, tc.note)
+		}
+	}
+}
+
+func TestVTEnrichKeepsItsSignature(t *testing.T) {
+	s, reqs := stub(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+		w.Write([]byte(jobRunning))
+	})
+	res, err := s.VTEnrich(context.Background(), "a.example", "", 2, false)
+	if err != nil || res.Domain != "a.example" || res.Depth != 2 || res.IP != "" || res.State != "running" {
+		t.Errorf("result %+v, %v", res, err)
+	}
+	if got := strings.Join(*reqs, ", "); got != "POST "+enrichA {
+		t.Errorf("requests = %s", got)
+	}
+}
+
+const (
+	certSHA256    = "8f7a1c52e0b3d94a6c1f2e7b0d5a3c9e4b8f6a2d1c7e5b3a9f0d4c2e6b8a1f3d"
+	domainEnrich  = "/api/enrich/domain/a.example"
+	enrichStored  = "/api/domains/a.example/enrich"
+	enrichRunning = `{"job":"domain:a.example","state":"running","started_at":"2026-03-01T12:00:00Z"}`
+	enrichDone    = `{"job":"domain:a.example","state":"done","started_at":"2026-03-01T12:00:00Z","finished_at":"2026-03-01T12:00:04Z","status":"partial","counts":{"dns":1,"rdap":1,"ct":1,"subdomains":0},"errors":{"subdomains":"passive DNS: timeout"},"summary":"partial: dns 1, rdap 1, ct 1, subdomains failed"}`
+	enrichFailed  = `{"job":"domain:a.example","state":"failed","started_at":"2026-03-01T12:00:00Z","finished_at":"2026-03-01T12:00:04Z","status":"ok","counts":{"dns":1,"rdap":1,"ct":1,"subdomains":0},"summary":"ok: dns 1, rdap 1, ct 1, subdomains 0","error":"internal error"}`
+	enrichBody    = `{"fqdn":"a.example","fetched_at":"2026-03-01T12:00:04Z","status":"partial",` +
+		`"dns":{"resolver":"9.9.9.9:53","records":[{"qtype":"A","rcode":"NOERROR","ttl":300,"rdata":["192.0.2.1"]}]},` +
+		`"zone":{"name":"a.example","soa":[],"ns":["ana.ns.cloudflare.com","bob.ns.cloudflare.com"]},` +
+		`"rdap":{"domain":"a.example","registrar":{"name":"NameCheap, Inc.","iana_id":"1068"},"registration":"2026-02-01T00:00:00Z","status":[],"nameservers":[],"entities":[]},` +
+		`"ct":{"zone":"a.example","total":1,"certificates":[{"id":"7392018311","cert_sha256":"` + certSHA256 + `","issuer":"R11","not_before":"2026-02-01T00:00:00Z","not_after":"2026-05-02T00:00:00Z","revoked":false,"names":["a.example"]}],"names":["a.example"],"truncated":false},` +
+		`"subdomains":null,"errors":{"subdomains":"passive DNS: timeout"},` +
+		`"graph":{"nodes":[{"id":"d:a.example","kind":"domain","label":"a.example","watched":false,"campaign":"","href":"/domains/a.example","source":"heimdall"}],"edges":[],"truncated":false,"excluded_cdn":0}}`
+)
+
+func TestDomainEnrich(t *testing.T) {
+	for _, tc := range []struct {
+		desc         string
+		fqdn         string
+		wait         bool
+		includeGraph bool
+		status       int
+		post         string
+		gets         []string
+		waitFor      time.Duration
+		wantReqs     string
+		wantErr      string
+		state        string
+		summary      bool
+		enrichment   bool
+		note         string
+	}{
+		{
+			desc:       "wait until done",
+			fqdn:       " A.Example. ",
+			wait:       true,
+			post:       enrichRunning,
+			gets:       []string{enrichRunning, enrichDone},
+			wantReqs:   "POST " + domainEnrich + ", GET " + domainEnrich + ", GET " + domainEnrich + ", GET " + enrichStored,
+			state:      "done",
+			summary:    true,
+			enrichment: true,
+		},
+		{
+			desc:         "wait until done, with the graph",
+			fqdn:         "a.example",
+			wait:         true,
+			includeGraph: true,
+			post:         enrichRunning,
+			gets:         []string{enrichDone},
+			wantReqs:     "POST " + domainEnrich + ", GET " + domainEnrich + ", GET " + enrichStored,
+			state:        "done",
+			summary:      true,
+			enrichment:   true,
+		},
+		{
+			desc:     "wait until failed",
+			fqdn:     "a.example",
+			wait:     true,
+			post:     enrichRunning,
+			gets:     []string{enrichFailed},
+			wantReqs: "POST " + domainEnrich + ", GET " + domainEnrich,
+			state:    "failed",
+			summary:  true,
+		},
+		{
+			desc:    "still running when the wait ends",
+			fqdn:    "a.example",
+			wait:    true,
+			post:    enrichRunning,
+			gets:    []string{enrichRunning},
+			waitFor: 20 * time.Millisecond,
+			state:   "running",
+			note:    "still running after 20ms",
+		},
+		{desc: "no wait", fqdn: "a.example", post: enrichRunning, wantReqs: "POST " + domainEnrich, state: "running"},
+		{
+			desc:     "viewer token",
+			fqdn:     "a.example",
+			wait:     true,
+			status:   http.StatusForbidden,
+			post:     `{"error":"forbidden"}`,
+			wantReqs: "POST " + domainEnrich,
+			wantErr:  "forbidden",
+		},
+		{desc: "empty", fqdn: " ", wantErr: "fqdn is required"},
+		{desc: "one label", fqdn: "localhost", wantErr: "invalid fqdn"},
+		{desc: "empty label", fqdn: "a..example", wantErr: "invalid fqdn"},
+		{desc: "bad character", fqdn: "a b.example", wantErr: "invalid fqdn"},
+		{desc: "path", fqdn: "a.example/x", wantErr: "invalid fqdn"},
+	} {
+		gets := 0
+		s, reqs := stub(t, func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodPost:
+				w.WriteHeader(cmp.Or(tc.status, http.StatusAccepted))
+				w.Write([]byte(tc.post))
+			case r.URL.Path == enrichStored:
+				w.Write([]byte(enrichBody))
+			default:
+				w.Write([]byte(tc.gets[min(gets, len(tc.gets)-1)]))
+				gets++
+			}
+		})
+		s.poll, s.maxWait = time.Millisecond, cmp.Or(tc.waitFor, 5*time.Second)
+		res, err := s.DomainEnrich(context.Background(), tc.fqdn, tc.wait, tc.includeGraph)
+		// The polls of a wait that ran out are not counted.
+		if got := strings.Join(*reqs, ", "); tc.waitFor == 0 && got != tc.wantReqs {
+			t.Errorf("%s: requests = %q, want %q", tc.desc, got, tc.wantReqs)
+		}
+		if tc.wantErr != "" {
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("%s: err %v, want one mentioning %q", tc.desc, err, tc.wantErr)
+			}
+			if tc.status != 0 && !heimdall.IsStatus(err, tc.status) {
+				t.Errorf("%s: err %v, want the HTTP %d as is", tc.desc, err, tc.status)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%s: %v", tc.desc, err)
+			continue
+		}
+		if res.FQDN != "a.example" || res.State != tc.state || (res.Summary != nil) != tc.summary || (res.State == "failed") != (res.Error != "") {
+			t.Errorf("%s: result %+v", tc.desc, res)
+		}
+		if (res.Enrichment != nil) != tc.enrichment {
+			t.Errorf("%s: enrichment %+v, want present %v", tc.desc, res.Enrichment, tc.enrichment)
+		}
+		if res.Enrichment != nil && (res.Enrichment.Graph != nil) != tc.includeGraph {
+			t.Errorf("%s: graph %+v, want present %v", tc.desc, res.Enrichment.Graph, tc.includeGraph)
+		}
+		if (tc.note == "") != (res.Note == "") || !strings.Contains(res.Note, tc.note) {
+			t.Errorf("%s: note %q, want one mentioning %q", tc.desc, res.Note, tc.note)
+		}
+		b, _ := json.Marshal(res)
+		if !strings.Contains(string(b), `"enrichment":`) || strings.Contains(string(b), `"graph"`) != tc.includeGraph {
+			t.Errorf("%s: encoded as %s", tc.desc, b)
+		}
+		if tc.enrichment && !strings.Contains(string(b), `"cert_sha256":"`+certSHA256+`"`) {
+			t.Errorf("%s: encoded without the whole SHA-256: %s", tc.desc, b)
+		}
+	}
+}
+
+func TestDomainEnrichment(t *testing.T) {
+	for _, tc := range []struct {
+		desc         string
+		fqdn         string
+		includeGraph bool
+		status       int
+		wantReqs     string
+		wantErr      string
+		notEnriched  bool
+	}{
+		{desc: "without graph", fqdn: "a.example.", wantReqs: "GET " + enrichStored},
+		{desc: "with graph", fqdn: "a.example", includeGraph: true, wantReqs: "GET " + enrichStored},
+		{desc: "never enriched", fqdn: "a.example", status: http.StatusNotFound, wantReqs: "GET " + enrichStored, wantErr: "not enriched yet, run hd_domain_enrich", notEnriched: true},
+		{desc: "server error", fqdn: "a.example", status: http.StatusInternalServerError, wantReqs: "GET " + enrichStored, wantErr: "HTTP 500"},
+		{desc: "invalid", fqdn: "a..example", wantErr: "invalid fqdn"},
+	} {
+		s, reqs := stub(t, func(w http.ResponseWriter, r *http.Request) {
+			if tc.status != 0 {
+				http.Error(w, `{"error":"not found"}`, tc.status)
+				return
+			}
+			w.Write([]byte(enrichBody))
+		})
+		res, err := s.DomainEnrichment(context.Background(), tc.fqdn, tc.includeGraph)
+		if got := strings.Join(*reqs, ", "); got != tc.wantReqs {
+			t.Errorf("%s: requests = %q, want %q", tc.desc, got, tc.wantReqs)
+		}
+		if tc.wantErr != "" {
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) || errors.Is(err, heimdall.ErrNotEnriched) != tc.notEnriched {
+				t.Errorf("%s: err %v, want one mentioning %q", tc.desc, err, tc.wantErr)
+			}
+			continue
+		}
+		if err != nil || res.FQDN != "a.example" || res.Enrichment == nil || (res.Enrichment.Graph != nil) != tc.includeGraph {
+			t.Errorf("%s: result %+v, %v", tc.desc, res, err)
+			continue
+		}
+		if e := res.Enrichment; e.Errors["subdomains"] == "" || e.Subdomains != nil || e.CT == nil || e.CT.Certificates[0].CertSHA256 != certSHA256 {
+			t.Errorf("%s: enrichment %+v", tc.desc, e)
+		}
+	}
+}
+
+func TestLinkDomain(t *testing.T) {
+	for _, tc := range []struct {
+		desc, fqdn, campaign, newName, newDesc string
+		status                                 int
+		wantReqs                               string
+		wantBody                               string
+		wantErr                                string
+	}{
+		{
+			desc:     "campaign by name",
+			fqdn:     "A.example",
+			campaign: "SpyNote",
+			wantReqs: "GET /api/campaigns, POST /api/domains/a.example/link",
+			wantBody: `{"campaign":2}`,
+		},
+		{
+			desc:     "campaign by id",
+			fqdn:     "a.example",
+			campaign: "3",
+			wantReqs: "GET /api/campaigns, POST /api/domains/a.example/link",
+			wantBody: `{"campaign":3}`,
+		},
+		{
+			desc:     "new campaign",
+			fqdn:     "a.example",
+			newName:  " spynote-2026 ",
+			newDesc:  "March wave",
+			wantReqs: "POST /api/domains/a.example/link",
+			wantBody: `{"new_campaign":{"name":"spynote-2026","description":"March wave"}}`,
+		},
+		{
+			desc:     "new campaign exists",
+			fqdn:     "a.example",
+			newName:  "SpyNote",
+			status:   http.StatusConflict,
+			wantReqs: "POST /api/domains/a.example/link",
+			wantBody: `{"new_campaign":{"name":"SpyNote","description":""}}`,
+			wantErr:  `campaign "SpyNote" already exists`,
+		},
+		{
+			desc:     "viewer token",
+			fqdn:     "a.example",
+			newName:  "x",
+			status:   http.StatusForbidden,
+			wantReqs: "POST /api/domains/a.example/link",
+			wantBody: `{"new_campaign":{"name":"x","description":""}}`,
+			wantErr:  "HTTP 403",
+		},
+		{desc: "unknown campaign", fqdn: "a.example", campaign: "missing", wantReqs: "GET /api/campaigns", wantErr: "no campaign"},
+		{desc: "both", fqdn: "a.example", campaign: "spynote", newName: "x", wantErr: "either"},
+		{desc: "neither", fqdn: "a.example", wantErr: "either"},
+		{desc: "description without new campaign", fqdn: "a.example", campaign: "spynote", newDesc: "x", wantErr: "new campaign only"},
+		{desc: "invalid fqdn", fqdn: "a", campaign: "spynote", wantErr: "invalid fqdn"},
+	} {
+		var gotBody string
+		s, reqs := stub(t, func(w http.ResponseWriter, r *http.Request) {
+			b, _ := io.ReadAll(r.Body)
+			gotBody = string(b)
+			if tc.status != 0 {
+				http.Error(w, `{"error":"campaign exists"}`, tc.status)
+				return
+			}
+			w.Write([]byte(`{"fqdn":"a.example","campaign":{"id":2,"name":"SpyNote"},"action":"added","created_campaign":false}`))
+		})
+		res, err := s.LinkDomain(context.Background(), tc.fqdn, tc.campaign, tc.newName, tc.newDesc)
+		if got := strings.Join(*reqs, ", "); got != tc.wantReqs {
+			t.Errorf("%s: requests = %q, want %q", tc.desc, got, tc.wantReqs)
+		}
+		if gotBody != tc.wantBody {
+			t.Errorf("%s: body %s, want %s", tc.desc, gotBody, tc.wantBody)
+		}
+		if tc.wantErr != "" {
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("%s: err %v, want one mentioning %q", tc.desc, err, tc.wantErr)
+			}
+			if tc.status != 0 && !heimdall.IsStatus(err, tc.status) {
+				t.Errorf("%s: err %v, want the HTTP %d as is", tc.desc, err, tc.status)
+			}
+			continue
+		}
+		if err != nil || res.Action != "added" || res.Campaign.ID != 2 {
+			t.Errorf("%s: result %+v, %v", tc.desc, res, err)
+		}
+	}
+}
+
+func TestNSSet(t *testing.T) {
+	const graph = `{"nodes":[{"id":"ns:ana.ns.cloudflare.com,bob.ns.cloudflare.com","kind":"nsset","label":"ana.ns.cloudflare.com, bob.ns.cloudflare.com","watched":false,"campaign":"","href":"","source":"heimdall"},` +
+		`{"id":"d:a.example","kind":"domain","label":"a.example","watched":true,"campaign":"spynote","href":"/domains/a.example","source":"heimdall"},` +
+		`{"id":"d:b.example","kind":"domain","label":"b.example","watched":false,"campaign":"","href":"/domains/b.example","source":"heimdall"}],` +
+		`"edges":[],"truncated":%s,"excluded_cdn":0}`
+	many := make([]string, 17)
+	for i := range many {
+		many[i] = "ns" + strconv.Itoa(i) + ".example"
+	}
+	for _, tc := range []struct {
+		desc      string
+		ns        []string
+		truncated bool
+		wantPath  string
+		wantErr   string
+	}{
+		{
+			desc:     "normalized",
+			ns:       []string{" Bob.NS.Cloudflare.com. ", "ana.ns.cloudflare.com", "ana.ns.cloudflare.com.", ""},
+			wantPath: "/api/graph/ns/ana.ns.cloudflare.com,bob.ns.cloudflare.com",
+		},
+		{
+			desc:      "truncated",
+			ns:        []string{"ana.ns.cloudflare.com", "bob.ns.cloudflare.com"},
+			truncated: true,
+			wantPath:  "/api/graph/ns/ana.ns.cloudflare.com,bob.ns.cloudflare.com",
+		},
+		{desc: "16", ns: many[:16], wantPath: "/api/graph/ns/" + strings.Join(slices.Sorted(slices.Values(many[:16])), ",")},
+		{desc: "one", ns: []string{"ana.ns.cloudflare.com"}, wantErr: "got 1"},
+		{desc: "one, twice", ns: []string{"ana.ns.cloudflare.com", "ANA.ns.cloudflare.com."}, wantErr: "got 1"},
+		{desc: "none", wantErr: "got 0"},
+		{desc: "17", ns: many, wantErr: "got 17"},
+		{desc: "invalid", ns: []string{"ana.ns.cloudflare.com", "bob..cloudflare.com"}, wantErr: "invalid fqdn"},
+	} {
+		var gotPath string
+		s, reqs := stub(t, func(w http.ResponseWriter, r *http.Request) {
+			gotPath = r.URL.Path
+			fmt.Fprintf(w, graph, strconv.FormatBool(tc.truncated))
+		})
+		res, err := s.NSSet(context.Background(), tc.ns)
+		if tc.wantErr != "" {
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) || len(*reqs) != 0 {
+				t.Errorf("%s: err %v, requests %v; want one mentioning %q and no request", tc.desc, err, *reqs, tc.wantErr)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%s: %v", tc.desc, err)
+			continue
+		}
+		if gotPath != tc.wantPath {
+			t.Errorf("%s: path %q, want %q", tc.desc, gotPath, tc.wantPath)
+		}
+		want := []NSSetDomain{{FQDN: "a.example", Watched: true, Campaign: "spynote"}, {FQDN: "b.example"}}
+		if res.Returned != 2 || !slices.Equal(res.Domains, want) || res.Truncated != tc.truncated || (res.Note != "") != tc.truncated {
+			t.Errorf("%s: result %+v", tc.desc, res)
+		}
+		if tc.desc == "normalized" && strings.Join(res.NS, " ") != "ana.ns.cloudflare.com bob.ns.cloudflare.com" {
+			t.Errorf("%s: ns %v", tc.desc, res.NS)
 		}
 	}
 }
