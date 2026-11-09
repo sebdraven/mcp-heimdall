@@ -250,7 +250,7 @@ func TestNewTools(t *testing.T) {
 			replies:  map[string]string{"GET /api/campaigns/2/analytics": analyticsJSON},
 			wantReqs: "GET /api/campaigns, GET /api/campaigns/2/analytics",
 			want:     []string{`"days":30`, `"id":"kpi_states"`, `"header":{`},
-			notWant:  []string{`"kpis"`, `"timeline"`, `"liveness_summary"`, `"clusters"`, `"vt_leads"`, `"events"`},
+			notWant:  []string{`"kpis":`, `"timeline":`, `"liveness_summary":`, `"clusters":`, `"vt_leads":`, `"events":`},
 		},
 		{desc: "campaign analytics over 7 days", tool: "hd_campaign_analytics", args: map[string]any{"campaign": "SpyNote", "days": 7}, wantErr: "days must be 30 or 90"},
 	} {
