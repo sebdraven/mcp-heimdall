@@ -49,6 +49,8 @@ var commands = []struct {
 	{"enrichment", "[-graph] FQDN", enrichment},
 	{"link", "-campaign CAMPAIGN | -new NAME [-desc TEXT] FQDN", link},
 	{"ns-set", "NS1,NS2[,...]", nsSet},
+	{"correlations", "[-min-score F] [-kinds KIND,KIND] [-since 24h|7d|RFC3339] [-charts]", correlations},
+	{"correlation-pair", "[-kinds KIND,KIND] CAMPAIGN_A CAMPAIGN_B", correlationPair},
 }
 
 func usage() {
@@ -319,6 +321,36 @@ func nsSet(ctx context.Context, svc *service.Service, args []string) (any, error
 	return svc.NSSet(ctx, strings.Split(a[0], ","))
 }
 
+func splitKinds(s string) []string {
+	if s == "" {
+		return nil
+	}
+	return strings.Split(s, ",")
+}
+
+func correlations(ctx context.Context, svc *service.Service, args []string) (any, error) {
+	fs := flag.NewFlagSet("correlations", flag.ExitOnError)
+	var minScore optFloat
+	fs.Var(&minScore, "min-score", "lowest score of the pairs, 0 to 1 (default 0)")
+	kinds := fs.String("kinds", "", "kinds of link, comma-separated: cert, ns_set, ip, cname, mx, soa, rdap, vt (default all)")
+	since := fs.String("since", "", "start of new_links: RFC 3339 or duration back from now: 24h, 7d (default 7d)")
+	charts := fs.Bool("charts", false, "print only computed_at, campaigns and charts")
+	if _, err := parse("correlations", fs, args, 0); err != nil {
+		return nil, err
+	}
+	return svc.Correlations(ctx, minScore.v, splitKinds(*kinds), *since, *charts)
+}
+
+func correlationPair(ctx context.Context, svc *service.Service, args []string) (any, error) {
+	fs := flag.NewFlagSet("correlation-pair", flag.ExitOnError)
+	kinds := fs.String("kinds", "", "kinds of link, comma-separated: cert, ns_set, ip, cname, mx, soa, rdap, vt (default all)")
+	a, err := parse("correlation-pair", fs, args, 2)
+	if err != nil {
+		return nil, err
+	}
+	return svc.CorrelationPair(ctx, a[0], a[1], splitKinds(*kinds))
+}
+
 func vtBudget(ctx context.Context, svc *service.Service, args []string) (any, error) {
 	fs := flag.NewFlagSet("vt-budget", flag.ExitOnError)
 	if _, err := parse("vt-budget", fs, args, 0); err != nil {
@@ -348,7 +380,8 @@ func readList(path string) ([]string, error) {
 	return out, sc.Err()
 }
 
-// optBool, optInt and optString tell an absent flag from a zero value.
+// optBool, optInt, optFloat and optString tell an absent flag from a zero
+// value.
 type optBool struct{ v *bool }
 
 func (o *optBool) String() string {
@@ -384,6 +417,24 @@ func (o *optInt) Set(s string) error {
 		return err
 	}
 	o.v = &n
+	return nil
+}
+
+type optFloat struct{ v *float64 }
+
+func (o *optFloat) String() string {
+	if o == nil || o.v == nil {
+		return ""
+	}
+	return strconv.FormatFloat(*o.v, 'f', -1, 64)
+}
+
+func (o *optFloat) Set(s string) error {
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return err
+	}
+	o.v = &f
 	return nil
 }
 

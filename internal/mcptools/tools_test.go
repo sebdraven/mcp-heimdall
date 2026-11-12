@@ -15,7 +15,8 @@ import (
 )
 
 const (
-	campaignsJSON = `[{"id":2,"name":"SpyNote","family":"SpyNote","description":"","domains":0,"created_at":"2026-03-01T12:00:00Z"}]`
+	campaignsJSON = `[{"id":2,"name":"SpyNote","family":"SpyNote","description":"","domains":0,"created_at":"2026-03-01T12:00:00Z"},` +
+		`{"id":5,"name":"FluBot","family":"FluBot","description":"","domains":0,"created_at":"2026-03-01T12:00:00Z"}]`
 	certSHA256    = "8f7a1c52e0b3d94a6c1f2e7b0d5a3c9e4b8f6a2d1c7e5b3a9f0d4c2e6b8a1f3d"
 	enrichRunning = `{"job":"domain:a.example","state":"running","started_at":"2026-03-01T12:00:00Z"}`
 	enrichDone    = `{"job":"domain:a.example","state":"done","started_at":"2026-03-01T12:00:00Z","finished_at":"2026-03-01T12:00:04Z","status":"ok","counts":{"dns":1,"rdap":0,"ct":1,"subdomains":0},"summary":"ok: dns 1, rdap 0, ct 1, subdomains 0"}`
@@ -33,6 +34,16 @@ const (
 		`"edges":[{"from":"d:a.example","to":"ns:ana.ns.cloudflare.com,bob.ns.cloudflare.com","kind":"NS_SET"}],"truncated":false,"excluded_cdn":0}`
 	linkReply = `{"fqdn":"a.example","campaign":{"id":2,"name":"SpyNote"},"action":"added","created_campaign":false}`
 	vtRunning = `{"job":"ip:192.0.2.1","state":"running","started_at":"2026-03-01T12:00:00Z"}`
+
+	correlationsReply = `{"campaigns":[{"id":2,"name":"SpyNote"},{"id":5,"name":"FluBot"}],` +
+		`"pairs":[{"a":2,"b":5,"score":1,"counts":{"cert":1},"first_seen":"2026-02-20T10:00:00Z","last_seen":"2026-03-01T11:00:00Z"}],` +
+		`"new_links":[{"kind":"cert","value":"` + certSHA256 + `","domain_a":"a.example","campaign_a":2,"domain_b":"b.example","campaign_b":5,"first_seen":"2026-02-28T09:00:00Z","last_seen":"2026-03-01T11:00:00Z"}],` +
+		`"computed_at":"2026-03-01T11:00:00Z"}`
+	notComputedReply = `{"campaigns":[{"id":2,"name":"SpyNote"}],"pairs":[],"new_links":[],"computed_at":null}`
+	pairReply        = `{"a":{"id":2,"name":"SpyNote"},"b":{"id":5,"name":"FluBot"},"score":1,"counts":{"cert":1},` +
+		`"evidence":[{"kind":"cert","value":"` + certSHA256 + `","domain_a":"a.example","campaign_a":2,"domain_b":"b.example","campaign_b":5,"weight":1,` +
+		`"period":{"first":"2026-02-01T00:00:00Z","last":"2026-05-02T00:00:00Z"},"first_seen":"2026-02-28T09:00:00Z","last_seen":"2026-03-01T11:00:00Z"}],` +
+		`"past":[],"computed_at":"2026-03-01T11:00:00Z"}`
 )
 
 const analyticsJSON = `{"days":30,` +
@@ -114,6 +125,8 @@ func TestNewToolsListed(t *testing.T) {
 	}
 	for name, params := range map[string][]string{
 		"hd_campaign_analytics": {"campaign", "days", "charts_only"},
+		"hd_correlations":       {"min_score", "kinds", "since", "charts_only"},
+		"hd_correlation_pair":   {"a", "b", "kinds"},
 		"hd_domain_enrich":      {"fqdn", "wait", "include_graph"},
 		"hd_domain_enrichment":  {"fqdn", "include_graph"},
 		"hd_link_domain":        {"fqdn", "campaign", "new_campaign_name", "new_campaign_description"},
@@ -253,6 +266,52 @@ func TestNewTools(t *testing.T) {
 			notWant:  []string{`"kpis":`, `"timeline":`, `"liveness_summary":`, `"clusters":`, `"vt_leads":`, `"events":`},
 		},
 		{desc: "campaign analytics over 7 days", tool: "hd_campaign_analytics", args: map[string]any{"campaign": "SpyNote", "days": 7}, wantErr: "days must be 30 or 90"},
+		{
+			desc:     "correlations",
+			tool:     "hd_correlations",
+			args:     map[string]any{},
+			replies:  map[string]string{"GET /api/correlations": correlationsReply},
+			wantReqs: "GET /api/correlations",
+			want: []string{`"a_name":"SpyNote"`, `"b_name":"FluBot"`, `"campaign_a_name":"SpyNote"`, `"value":"` + certSHA256 + `"`,
+				`"id":"pair_scores"`, `"id":"links_by_kind"`, `"id":"score_matrix"`, `"x":["SpyNote ↔ FluBot"]`, `"since":`},
+			notWant: []string{`"note":`},
+		},
+		{
+			desc:     "correlations, charts only",
+			tool:     "hd_correlations",
+			args:     map[string]any{"min_score": 0.5, "kinds": []string{"cert"}, "since": "24h", "charts_only": true},
+			replies:  map[string]string{"GET /api/correlations": correlationsReply},
+			wantReqs: "GET /api/correlations",
+			want:     []string{`"computed_at":"2026-03-01T11:00:00Z"`, `"campaigns":[`, `"id":"score_matrix"`},
+			notWant:  []string{`"pairs":`, `"new_links":`, `"since":`},
+		},
+		{
+			desc:     "correlations not computed",
+			tool:     "hd_correlations",
+			args:     map[string]any{},
+			replies:  map[string]string{"GET /api/correlations": notComputedReply},
+			wantReqs: "GET /api/correlations",
+			want:     []string{`"computed_at":null`, `"charts":[]`, `"note":"correlation not computed yet (Heimdall computes every hour)"`},
+		},
+		{desc: "correlations above score 1", tool: "hd_correlations", args: map[string]any{"min_score": 2}, wantErr: "min_score must be between 0 and 1"},
+		{desc: "correlations of an unknown kind", tool: "hd_correlations", args: map[string]any{"kinds": []string{"dns"}}, wantErr: `unknown kind`},
+		{
+			desc:     "correlation pair",
+			tool:     "hd_correlation_pair",
+			args:     map[string]any{"a": "SpyNote", "b": "5"},
+			replies:  map[string]string{"GET /api/correlations/2/5": pairReply},
+			wantReqs: "GET /api/campaigns, GET /api/campaigns, GET /api/correlations/2/5",
+			want: []string{`"a":{"id":2,"name":"SpyNote"}`, `"b":{"id":5,"name":"FluBot"}`, `"campaign_b_name":"FluBot"`, `"value":"` + certSHA256 + `"`,
+				`"id":"evidence_by_kind"`, `"name":"max weight"`, `"past":[]`},
+			notWant: []string{`"note":`},
+		},
+		{
+			desc:     "correlation pair of one campaign",
+			tool:     "hd_correlation_pair",
+			args:     map[string]any{"a": "SpyNote", "b": "2"},
+			wantReqs: "GET /api/campaigns, GET /api/campaigns",
+			wantErr:  "same campaign",
+		},
 	} {
 		cs, requests := connect(t, tc.replies)
 		res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: tc.tool, Arguments: tc.args})

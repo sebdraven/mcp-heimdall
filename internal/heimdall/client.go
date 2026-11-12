@@ -498,6 +498,73 @@ type VTLead struct {
 	LastSeen string   `json:"last_seen"`
 }
 
+// Correlations holds the pairs of campaigns of Heimdall's last computation,
+// ComputedAt nil before the first, and the links first seen since the query's
+// since.
+type Correlations struct {
+	Campaigns  []CampaignRef     `json:"campaigns"`
+	Pairs      []CorrelationPair `json:"pairs"`
+	NewLinks   []CorrelationLink `json:"new_links"`
+	ComputedAt *string           `json:"computed_at"`
+}
+
+// CorrelationPair links campaigns A < B; Counts holds the distinct values
+// linked per kind.
+type CorrelationPair struct {
+	A         int64          `json:"a"`
+	B         int64          `json:"b"`
+	Score     float64        `json:"score"`
+	Counts    map[string]int `json:"counts"`
+	FirstSeen *string        `json:"first_seen"`
+	LastSeen  *string        `json:"last_seen"`
+}
+
+// CorrelationLink is a link of Heimdall's history, DomainA < DomainB.
+type CorrelationLink struct {
+	Kind      string `json:"kind"`
+	Value     string `json:"value"`
+	DomainA   string `json:"domain_a"`
+	CampaignA int64  `json:"campaign_a"`
+	DomainB   string `json:"domain_b"`
+	CampaignB int64  `json:"campaign_b"`
+	FirstSeen string `json:"first_seen"`
+	LastSeen  string `json:"last_seen"`
+}
+
+// CorrelationEvidence is a current link. Period is when both domains held
+// the value, the validity of a certificate or the two registration dates.
+type CorrelationEvidence struct {
+	Kind      string  `json:"kind"`
+	Value     string  `json:"value"`
+	DomainA   string  `json:"domain_a"`
+	CampaignA int64   `json:"campaign_a"`
+	DomainB   string  `json:"domain_b"`
+	CampaignB int64   `json:"campaign_b"`
+	Weight    float64 `json:"weight"`
+	Period    *Period `json:"period"`
+	FirstSeen *string `json:"first_seen"`
+	LastSeen  *string `json:"last_seen"`
+}
+
+// CorrelationPairDetail holds the current links of a pair and, in Past, the
+// links of its history no longer found.
+type CorrelationPairDetail struct {
+	A          CampaignRef           `json:"a"`
+	B          CampaignRef           `json:"b"`
+	Score      float64               `json:"score"`
+	Counts     map[string]int        `json:"counts"`
+	Evidence   []CorrelationEvidence `json:"evidence"`
+	Past       []CorrelationLink     `json:"past"`
+	ComputedAt *string               `json:"computed_at"`
+}
+
+// CorrelationQuery leaves out of the request what is nil or empty.
+type CorrelationQuery struct {
+	MinScore *float64
+	Kinds    []string
+	Since    string
+}
+
 type NewDomain struct {
 	FQDN            string `json:"fqdn"`
 	Campaign        string `json:"campaign,omitempty"`
@@ -852,4 +919,29 @@ func (c *Client) NSGraph(ctx context.Context, ns []string) (Graph, error) {
 		parts[i] = url.PathEscape(n)
 	}
 	return call[Graph](ctx, c, http.MethodGet, "/api/graph/ns/"+strings.Join(parts, ","), nil, nil)
+}
+
+func kindsQuery(v url.Values, kinds []string) url.Values {
+	if len(kinds) > 0 {
+		v.Set("kinds", strings.Join(kinds, ","))
+	}
+	return v
+}
+
+// Correlations reads the pairs of campaigns Heimdall linked.
+func (c *Client) Correlations(ctx context.Context, q CorrelationQuery) (Correlations, error) {
+	v := kindsQuery(url.Values{}, q.Kinds)
+	if q.MinScore != nil {
+		v.Set("min_score", strconv.FormatFloat(*q.MinScore, 'f', -1, 64))
+	}
+	if q.Since != "" {
+		v.Set("since", q.Since)
+	}
+	return call[Correlations](ctx, c, http.MethodGet, "/api/correlations", v, nil)
+}
+
+// CorrelationPair reads the links between campaigns a and b.
+func (c *Client) CorrelationPair(ctx context.Context, a, b int64, kinds []string) (CorrelationPairDetail, error) {
+	path := "/api/correlations/" + strconv.FormatInt(a, 10) + "/" + strconv.FormatInt(b, 10)
+	return call[CorrelationPairDetail](ctx, c, http.MethodGet, path, kindsQuery(url.Values{}, kinds), nil)
 }

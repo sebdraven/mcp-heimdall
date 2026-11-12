@@ -42,6 +42,27 @@ const (
 
 	termVTCache = "Read from Heimdall's cache only: this never calls VirusTotal nor spends its budget. " +
 		"An error if Heimdall has no VirusTotal configured. "
+
+	termCorrelation = "Heimdall links two domains of two different campaigns when they share a piece of infrastructure, each link of one kind and weight: " +
+		"cert (1.0): the same certificate, by its full SHA-256, among the stored enrichments (hd_domain_enrich); " +
+		"ns_set (0.9): the same current NS set of at least 2 nameservers, strictly equal, on different zones; " +
+		"ip (0.8/n): the same A or AAAA address over overlapping passive DNS periods, n being the number of watched domains, all campaigns, that held it over that overlap; " +
+		"cname (0.7): the same CNAME target; mx (0.5): the same MX host; soa (0.4): the same SOA mname and rname, on different zones; " +
+		"rdap (0.3): the same registrar and registration dates less than 48 hours apart, on different registrable domains; " +
+		"vt (0.3): VirusTotal saw a domain of one campaign on an address a domain of the other held in Heimdall's passive DNS. " +
+		"Left out: CDN addresses (the operator's CDN prefixes) for ip and vt, and CNAME targets resolving to them; an address of more than 20 watched domains (shared hosting); " +
+		"CNAME targets of known CDN and edge providers (cloudfront.net, fastly.net, akamaiedge.net, edgekey.net, b-cdn.net, azureedge.net, cdn77.org, cloudflare.net and others); " +
+		"MX hosts of large mail providers (google.com, googlemail.com, outlook.com, protection.outlook.com, zoho.*, yandex.*, mail.ru, icloud.com and others); " +
+		"the SOA defaults of large DNS providers (Cloudflare, AWS, Azure, GoDaddy, Namecheap and others); any value held by more than 100 watched domains. " +
+		"The score of a pair of campaigns is 1 − Π(1 − weight) over its distinct values (kind, value), each at its highest weight, capped at 1: " +
+		"a cert alone gives 1, an ns_set and an mx give 1 − 0.1 × 0.5 = 0.95. " +
+		"value is what is shared: the full SHA-256 for cert, the nameservers joined by commas for ns_set, the address for ip and vt, the target or host name for cname and mx, " +
+		"mname and rname separated by a space for soa, the registrar for rdap. " +
+		"Heimdall computes the links every hour from its own data only, querying nothing outside; computed_at is when, null before its first run since Heimdall started. " +
+		"A link is a lead, not attribution: a registrar or hosting provider can link unrelated operators. "
+
+	termCorrelationCharts = "This tool draws nothing: charts is a list of specs for the client to plot, one spec per chart, " +
+		"{id, title, style (bar), x_label, y_label, x, series: [{name, values}]}, every values as long as x and numbers only; a chart with no x or only zeros is left out. "
 )
 
 type registry struct{ svc *service.Service }
@@ -229,6 +250,37 @@ func Register(s *mcp.Server, svc *service.Service) {
 			"An identical set is a strong sign of one operator: providers such as Cloudflare give each account its own nameserver pair, so the same pair means the same account. " +
 			"hd_pivots gives the NS set of a name in ns_pairs. Results may include names outside the watchlist. " + scope,
 	}, r.nsSet)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "hd_correlations",
+		Description: "The pairs of campaigns Heimdall linked through shared infrastructure, highest score first, and the links first seen recently. " +
+			termCorrelation +
+			"campaigns lists every campaign {id, name}. pairs: {a, a_name, b, b_name, score, counts, first_seen, last_seen}, a < b, counts giving the distinct values linked per kind; " +
+			"only the pairs scoring at least min_score (0 to 1, default 0) on kinds (default all, the score then computed on those kinds only). " +
+			"new_links: the links of Heimdall's history first seen since since (RFC 3339 or a duration back from now: 90m, 24h, 7d; default 7 days), at most 500, " +
+			"{kind, value, domain_a, campaign_a, campaign_a_name, domain_b, campaign_b, campaign_b_name, first_seen, last_seen}; since is the instant used. " +
+			termCorrelationCharts +
+			"pair_scores: x is the 15 pairs with the highest score, as 'A ↔ B' (a campaign missing from campaigns shows as #id), the series score. " +
+			"links_by_kind: the same x, one series per kind of link, the distinct values linked, 0 if none; a kind at 0 for every pair is left out. " +
+			"score_matrix: x is the campaigns of at least one pair, one series per such campaign, its score with each x, 0 on the diagonal and without a link: " +
+			"plotted as grouped bars, it reads as the matrix of the pairs. " +
+			"new_links_by_day: x is the UTC days (YYYY-MM-DD) from the day of since to today, one series per kind among new_links, the links first seen that day, 0 on days without. " +
+			"With charts_only, only computed_at, campaigns and charts come back. A note says when Heimdall has not computed the links yet. " + scope,
+	}, r.correlations)
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "hd_correlation_pair",
+		Description: "The links between two campaigns a and b, each an id or exact, case-sensitive name, two different campaigns, on kinds (default all). " +
+			termCorrelation +
+			"Returns a and b {id, name}, score and counts as in hd_correlations, and evidence: the current links, highest weight first then latest first_seen, " +
+			"{kind, value, domain_a, campaign_a, campaign_a_name, domain_b, campaign_b, campaign_b_name, weight, period, first_seen, last_seen}; " +
+			"period {first, last} is when both domains held the value, the validity of the certificate for cert, the two registration dates for rdap; " +
+			"first_seen and last_seen are when Heimdall's hourly computation first and last found the link. " +
+			"past: the links of the pair's history no longer found, newest last_seen first. " +
+			termCorrelationCharts +
+			"evidence_by_kind: x is the kinds of link among evidence, the series links (how many) and max weight (the highest weight of that kind). " +
+			"A note says when Heimdall has not computed the links yet. " + scope,
+	}, r.correlationPair)
 }
 
 type pdnsInput struct {
@@ -329,6 +381,19 @@ type nsSetInput struct {
 	NS []string `json:"ns" jsonschema:"2 to 16 nameserver names, e.g. ana.ns.cloudflare.com and bob.ns.cloudflare.com"`
 }
 
+type correlationsInput struct {
+	MinScore   *float64 `json:"min_score,omitempty" jsonschema:"lowest score of the pairs returned, 0 to 1 (default 0)"`
+	Kinds      []string `json:"kinds,omitempty" jsonschema:"kinds of link to keep among cert, ns_set, ip, cname, mx, soa, rdap, vt (default all)"`
+	Since      string   `json:"since,omitempty" jsonschema:"start of new_links: RFC 3339 instant or duration back from now: 90m, 24h, 7d (default 7d)"`
+	ChartsOnly bool     `json:"charts_only,omitempty" jsonschema:"return only computed_at, campaigns and charts (default false)"`
+}
+
+type correlationPairInput struct {
+	A     string   `json:"a" jsonschema:"campaign id or exact, case-sensitive name"`
+	B     string   `json:"b" jsonschema:"another campaign, id or exact, case-sensitive name"`
+	Kinds []string `json:"kinds,omitempty" jsonschema:"kinds of link to keep among cert, ns_set, ip, cname, mx, soa, rdap, vt (default all)"`
+}
+
 func (r *registry) pdnsQuery(ctx context.Context, _ *mcp.CallToolRequest, in pdnsInput) (*mcp.CallToolResult, service.PDNSResult, error) {
 	res, err := r.svc.PDNSQuery(ctx, in.RRName, in.Limit)
 	return nil, res, err
@@ -421,5 +486,15 @@ func (r *registry) linkDomain(ctx context.Context, _ *mcp.CallToolRequest, in li
 
 func (r *registry) nsSet(ctx context.Context, _ *mcp.CallToolRequest, in nsSetInput) (*mcp.CallToolResult, service.NSSetResult, error) {
 	res, err := r.svc.NSSet(ctx, in.NS)
+	return nil, res, err
+}
+
+func (r *registry) correlations(ctx context.Context, _ *mcp.CallToolRequest, in correlationsInput) (*mcp.CallToolResult, service.CorrelationsResult, error) {
+	res, err := r.svc.Correlations(ctx, in.MinScore, in.Kinds, in.Since, in.ChartsOnly)
+	return nil, res, err
+}
+
+func (r *registry) correlationPair(ctx context.Context, _ *mcp.CallToolRequest, in correlationPairInput) (*mcp.CallToolResult, service.CorrelationPairResult, error) {
+	res, err := r.svc.CorrelationPair(ctx, in.A, in.B, in.Kinds)
 	return nil, res, err
 }
