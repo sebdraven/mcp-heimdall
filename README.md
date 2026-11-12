@@ -27,7 +27,11 @@ and change domains and run enrichments.
 fail with its 404. `hd_campaign_analytics` needs a Heimdall at or after
 [sebdraven/heimdall#13](https://github.com/sebdraven/heimdall/pull/13)
 (commit `1d8b575`, "Campaign analytics workspace"), which serves
-`/api/campaigns/{id}/analytics`.
+`/api/campaigns/{id}/analytics`. `hd_correlations` and `hd_correlation_pair`
+need a Heimdall at or after
+[sebdraven/heimdall#17](https://github.com/sebdraven/heimdall/pull/17)
+(commit `a51425b`, "CDN sync and cross-campaign correlation"), which serves
+`/api/correlations` and `/api/correlations/{a}/{b}`.
 
 ## Tools
 
@@ -41,6 +45,8 @@ fail with its 404. `hd_campaign_analytics` needs a Heimdall at or after
 | `hd_campaigns` | the campaigns and how many domains each watches |
 | `hd_campaign_domains` | the domains of one campaign, by id or exact name |
 | `hd_campaign_analytics` | how a campaign behaved over 30 or 90 days: KPIs, domain states per day, events per kind, shared IPs and NS sets, VirusTotal leads, and chart specs ready to plot |
+| `hd_correlations` | which campaigns share infrastructure: scored pairs, links first seen recently, and chart specs ready to plot |
+| `hd_correlation_pair` | the links between two campaigns, current and past, each with its kind, value, domains, weight and period |
 | `hd_domains` | the whole watchlist, optionally only enabled or disabled entries |
 | `hd_create_campaign` | create a campaign, with optional malware family and description |
 | `hd_add_domains` | add domains to a campaign; reports added, already present and failed |
@@ -145,6 +151,73 @@ one per chart:
 
 A chart with no `x` or only zeros is left out. With `charts_only`, only
 `campaign`, `days`, `header` and `charts` come back.
+
+### Cross-campaign correlation
+
+Heimdall links two domains of two different campaigns when they share a
+piece of infrastructure. Each link has a kind and a weight:
+
+| Kind | Link | Weight |
+|---|---|---|
+| `cert` | the same certificate, by its full SHA-256, among the stored enrichments | 1.0 |
+| `ns_set` | the same current NS set (at least 2 nameservers, strictly equal), on different zones | 0.9 |
+| `ip` | the same A or AAAA address over overlapping passive DNS periods | 0.8 / n |
+| `cname` | the same CNAME target | 0.7 |
+| `mx` | the same MX host | 0.5 |
+| `soa` | the same SOA mname and rname, on different zones | 0.4 |
+| `rdap` | the same registrar, registration dates less than 48 hours apart, on different registrable domains | 0.3 |
+| `vt` | VirusTotal saw a domain of one campaign on an address a domain of the other held in passive DNS | 0.3 |
+
+For `ip`, n is the number of watched domains, all campaigns, that held the
+address over the overlap. Left out:
+
+- CDN addresses (the operator's CDN prefixes) for `ip` and `vt`, and CNAME
+  targets resolving to them;
+- an address of more than 20 watched domains, shared hosting;
+- CNAME targets of known CDN and edge providers (`cloudfront.net`,
+  `fastly.net`, `akamaiedge.net`, `edgekey.net`, `b-cdn.net`,
+  `azureedge.net`, `cdn77.org`, `cloudflare.net`…);
+- MX hosts of large mail providers (`google.com`, `outlook.com`, `zoho.*`,
+  `yandex.*`, `mail.ru`, `icloud.com`…);
+- the SOA defaults of large DNS providers (Cloudflare, AWS, Azure, GoDaddy,
+  Namecheap…);
+- any value held by more than 100 watched domains.
+
+The score of a pair of campaigns is 1 − Π(1 − weight) over its distinct
+values (kind, value), each at its highest weight, capped at 1: a `cert` alone
+gives 1, an `ns_set` and an `mx` give 0.95. Heimdall computes the links every
+hour from its own data only; `computed_at` is `null` before its first run
+since Heimdall started, and the tools then add a `note`. A link is a lead,
+not attribution.
+
+`hd_correlations` takes `min_score` (0 to 1), `kinds` (a subset of the eight;
+the score is then computed on those only), `since` (RFC 3339 or a duration
+back from now, 7 days by default) and `charts_only`. It returns `campaigns`,
+`pairs` (`a`, `a_name`, `b`, `b_name`, `score`, `counts` of distinct values
+per kind, `first_seen`, `last_seen`), highest score first, `new_links`, the
+links first seen since `since` with the names of their campaigns (at most
+500), and `charts`:
+
+| Chart | Style | x | Series |
+|---|---|---|---|
+| `pair_scores` | bar | the 15 pairs with the highest score, as `A ↔ B` | `score` |
+| `links_by_kind` | bar | the same pairs | one per kind of link, distinct values linked; a kind at 0 for every pair is left out |
+| `score_matrix` | bar | the campaigns of at least one pair | one per such campaign: its score with each x, 0 on the diagonal and without a link |
+| `new_links_by_day` | bar | the UTC days from `since` to today | one per kind among `new_links`, the links first seen that day |
+
+`score_matrix` plotted as grouped bars reads as the matrix of the pairs. With
+`charts_only`, only `computed_at`, `campaigns` and `charts` come back.
+
+`hd_correlation_pair` takes `a` and `b`, two different campaigns by id or
+exact name, and `kinds`. It returns `a`, `b`, `score`, `counts`, `evidence`
+(the current links, highest weight first, each with its `weight` and
+`period`: when both domains held the value, the validity of the certificate,
+or the two registration dates), `past` (the links no longer found) and the
+chart `evidence_by_kind` (x: the kinds of link; series `links` and
+`max weight`). Certificate values are full SHA-256 everywhere.
+
+Like the analytics, these tools draw nothing: `charts` are specs for the
+client to plot, in the same form.
 
 ### Domain enrichment
 
@@ -274,11 +347,17 @@ hdctl enrichment -graph www.example.com
 hdctl link -campaign spynote-2026 www.example.com
 hdctl link -new spynote-2027 -desc 'January wave' www.example.com
 hdctl ns-set ana.ns.cloudflare.com,bob.ns.cloudflare.com
+hdctl correlations
+hdctl correlations -min-score 0.5 -kinds cert,ns_set -since 30d -charts
+hdctl correlation-pair -kinds ip,vt spynote-2026 flubot-2026
 ```
 
 `pivots` prints `excluded_cdn` and `ns_pairs` next to `pivots`.
 `analytics` takes `-days 30` (the default) or `-days 90`, and `-charts` for
 `campaign`, `days`, `header` and `charts` only.
+`correlations` takes `-min-score`, `-kinds` (comma-separated), `-since` and
+`-charts` for `computed_at`, `campaigns` and `charts` only;
+`correlation-pair` takes two campaigns, by id or exact name, and `-kinds`.
 `add-domains` reads `-f` one domain per line, `#` starting a comment, `-` for
 stdin, and defaults to a 43200-second (12-hour) interval. It exits 1 if any
 domain failed. `vt-enrich` and `enrich` exit 1 if the enrichment failed.
