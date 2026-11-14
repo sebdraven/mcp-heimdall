@@ -175,6 +175,7 @@ type EnrichCounts struct {
 	RDAP       int `json:"rdap"`
 	CT         int `json:"ct"`
 	Subdomains int `json:"subdomains"`
+	Lookyloo   int `json:"lookyloo"`
 }
 
 // EnrichSummary ends a domain enrichment; Errors maps a failed source to its
@@ -246,10 +247,11 @@ type Certificate struct {
 	NotAfter   string   `json:"not_after"`
 	Revoked    bool     `json:"revoked"`
 	Names      []string `json:"names"`
+	Sources    []string `json:"sources,omitempty"`
 }
 
-// CT holds the Cert Spotter issuances for Zone and below; Names is the union
-// of their names.
+// CT holds the issuances for Zone and below that Cert Spotter and ONYPHE
+// list, merged by SHA-256; Names is the union of their names.
 type CT struct {
 	Zone         string        `json:"zone"`
 	Total        int           `json:"total"`
@@ -268,6 +270,56 @@ type Subdomains struct {
 	Zone      string      `json:"zone"`
 	Names     []Subdomain `json:"names"`
 	Truncated bool        `json:"truncated"`
+}
+
+// Lookyloo holds the captures of a name on the user's Lookyloo instance,
+// latest first, and the trackers and hosts aggregated over them. Submitted
+// is the uuid of the capture this enrichment asked for. Captures is left out
+// when nil.
+type Lookyloo struct {
+	Instance      string            `json:"instance"`
+	CapturesFound int               `json:"captures_found"`
+	CapturesRead  int               `json:"captures_read"`
+	Truncated     bool              `json:"truncated"`
+	Submitted     *string           `json:"submitted"`
+	Captures      []LookylooCapture `json:"captures,omitzero"`
+	Trackers      []LookylooTracker `json:"trackers"`
+	Hosts         []LookylooHost    `json:"hosts"`
+}
+
+// LookylooCapture has Tree, its page on the instance, set by the service.
+type LookylooCapture struct {
+	UUID      string    `json:"uuid"`
+	Time      string    `json:"time"`
+	URL       string    `json:"url"`
+	Title     string    `json:"title"`
+	FinalURL  string    `json:"final_url"`
+	Redirects []string  `json:"redirects"`
+	Hostnames []string  `json:"hostnames"`
+	Trackers  []Tracker `json:"trackers"`
+	Tree      string    `json:"tree,omitempty"`
+}
+
+// Tracker is an identifier read from the URLs a page loaded; a payment ID is
+// "<provider>" or "<provider>:<merchant id>".
+type Tracker struct {
+	Kind string `json:"kind"`
+	ID   string `json:"id"`
+}
+
+// LookylooTracker is a tracker over the captures; Captures counts them.
+type LookylooTracker struct {
+	Kind      string `json:"kind"`
+	ID        string `json:"id"`
+	FirstSeen string `json:"first_seen"`
+	LastSeen  string `json:"last_seen"`
+	Captures  int    `json:"captures"`
+}
+
+type LookylooHost struct {
+	Name      string `json:"name"`
+	FirstSeen string `json:"first_seen"`
+	LastSeen  string `json:"last_seen"`
 }
 
 type GraphNode struct {
@@ -298,7 +350,8 @@ type Graph struct {
 }
 
 // DomainEnrichment is the last enrichment of a name. A source that failed is
-// nil, its message in Errors.
+// nil, its message in Errors, except CT and Lookyloo, which keep what they
+// read before the error.
 type DomainEnrichment struct {
 	FQDN       string            `json:"fqdn"`
 	FetchedAt  string            `json:"fetched_at"`
@@ -308,6 +361,7 @@ type DomainEnrichment struct {
 	RDAP       *RDAP             `json:"rdap"`
 	CT         *CT               `json:"ct"`
 	Subdomains *Subdomains       `json:"subdomains"`
+	Lookyloo   *Lookyloo         `json:"lookyloo"`
 	Errors     map[string]string `json:"errors"`
 	Graph      *Graph            `json:"graph,omitempty"`
 }

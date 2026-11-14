@@ -45,8 +45,8 @@ var commands = []struct {
 	{"vt-ip", "IP", vtIP},
 	{"vt-enrich", "[-depth 1|2] [-wait=false] FQDN | -campaign CAMPAIGN [-wait=false] | -ip IP [-wait=false]", vtEnrich},
 	{"vt-budget", "", vtBudget},
-	{"enrich", "[-no-wait] [-graph] FQDN", enrich},
-	{"enrichment", "[-graph] FQDN", enrichment},
+	{"enrich", "[-no-wait] [-graph] [-captures] FQDN", enrich},
+	{"enrichment", "[-graph] [-captures] FQDN", enrichment},
 	{"link", "-campaign CAMPAIGN | -new NAME [-desc TEXT] FQDN", link},
 	{"ns-set", "NS1,NS2[,...]", nsSet},
 	{"correlations", "[-min-score F] [-kinds KIND,KIND] [-since 24h|7d|RFC3339] [-charts]", correlations},
@@ -283,21 +283,23 @@ func enrich(ctx context.Context, svc *service.Service, args []string) (any, erro
 	fs := flag.NewFlagSet("enrich", flag.ExitOnError)
 	noWait := fs.Bool("no-wait", false, "return the started job at once")
 	graph := fs.Bool("graph", false, "include the graph of the enrichment")
+	captures := fs.Bool("captures", false, "include each Lookyloo capture with its tree link")
 	a, err := parse("enrich", fs, args, 1)
 	if err != nil {
 		return nil, err
 	}
-	return svc.DomainEnrich(ctx, a[0], !*noWait, *graph)
+	return svc.DomainEnrich(ctx, a[0], !*noWait, *graph, *captures)
 }
 
 func enrichment(ctx context.Context, svc *service.Service, args []string) (any, error) {
 	fs := flag.NewFlagSet("enrichment", flag.ExitOnError)
 	graph := fs.Bool("graph", false, "include the graph of the enrichment")
+	captures := fs.Bool("captures", false, "include each Lookyloo capture with its tree link")
 	a, err := parse("enrichment", fs, args, 1)
 	if err != nil {
 		return nil, err
 	}
-	return svc.DomainEnrichment(ctx, a[0], *graph)
+	return svc.DomainEnrichment(ctx, a[0], *graph, *captures)
 }
 
 func link(ctx context.Context, svc *service.Service, args []string) (any, error) {
@@ -332,7 +334,7 @@ func correlations(ctx context.Context, svc *service.Service, args []string) (any
 	fs := flag.NewFlagSet("correlations", flag.ExitOnError)
 	var minScore optFloat
 	fs.Var(&minScore, "min-score", "lowest score of the pairs, 0 to 1 (default 0)")
-	kinds := fs.String("kinds", "", "kinds of link, comma-separated: cert, ns_set, ip, cname, mx, soa, rdap, vt (default all)")
+	kinds := fs.String("kinds", "", "kinds of link, comma-separated: cert, tracker, ns_set, ip, cname, mx, soa, rdap, vt (default all)")
 	since := fs.String("since", "", "start of new_links: RFC 3339 or duration back from now: 24h, 7d (default 7d)")
 	charts := fs.Bool("charts", false, "print only computed_at, campaigns and charts")
 	if _, err := parse("correlations", fs, args, 0); err != nil {
@@ -343,7 +345,7 @@ func correlations(ctx context.Context, svc *service.Service, args []string) (any
 
 func correlationPair(ctx context.Context, svc *service.Service, args []string) (any, error) {
 	fs := flag.NewFlagSet("correlation-pair", flag.ExitOnError)
-	kinds := fs.String("kinds", "", "kinds of link, comma-separated: cert, ns_set, ip, cname, mx, soa, rdap, vt (default all)")
+	kinds := fs.String("kinds", "", "kinds of link, comma-separated: cert, tracker, ns_set, ip, cname, mx, soa, rdap, vt (default all)")
 	a, err := parse("correlation-pair", fs, args, 2)
 	if err != nil {
 		return nil, err

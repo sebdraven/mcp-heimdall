@@ -54,7 +54,7 @@ need a Heimdall at or after
 | `hd_vt_ip` | which names VirusTotal saw on an IP, from Heimdall's cache, each `watched` or not with its campaign |
 | `hd_vt_enrich` | look up with VirusTotal the graph of a domain (depth 1 or 2), of a campaign, or one IP; spends the daily budget |
 | `hd_vt_budget` | the VirusTotal lookups of the UTC day: budget, used, remaining |
-| `hd_domain_enrich` | enrich one name now: live DNS and zone, RDAP, Cert Spotter certificates, subdomains from passive DNS; stored by Heimdall |
+| `hd_domain_enrich` | enrich one name now from five sources: live DNS and zone, RDAP, Cert Spotter and ONYPHE certificates, subdomains from passive DNS, Lookyloo captures and their trackers; stored by Heimdall |
 | `hd_domain_enrichment` | the last stored enrichment of a name, read only |
 | `hd_link_domain` | put a name in a campaign, existing or created on the way: added to the watchlist, moved, or unchanged |
 | `hd_ns_set` | which names have exactly this NS set (2 to 16 nameservers) |
@@ -160,6 +160,7 @@ piece of infrastructure. Each link has a kind and a weight:
 | Kind | Link | Weight |
 |---|---|---|
 | `cert` | the same certificate, by its full SHA-256, among the stored enrichments | 1.0 |
+| `tracker` | the same tracker identifier among the Lookyloo captures of the stored enrichments | 1.0, 0.9 or 0.6 by kind |
 | `ns_set` | the same current NS set (at least 2 nameservers, strictly equal), on different zones | 0.9 |
 | `ip` | the same A or AAAA address over overlapping passive DNS periods | 0.8 / n |
 | `cname` | the same CNAME target | 0.7 |
@@ -167,6 +168,14 @@ piece of infrastructure. Each link has a kind and a weight:
 | `soa` | the same SOA mname and rname, on different zones | 0.4 |
 | `rdap` | the same registrar, registration dates less than 48 hours apart, on different registrable domains | 0.3 |
 | `vt` | VirusTotal saw a domain of one campaign on an address a domain of the other held in passive DNS | 0.3 |
+
+For `tracker`, the value is `<kind>:<id>` (`gads:AW-11021906314`) and the
+weight 1.0 for an advertising or payment account (`gads`, `fbpixel`,
+`bing_uet`, `payment` with a merchant id), 0.9 for a Google Analytics or Tag
+Manager property (`gtm`, `ga4`, `ua`), 0.6 for another analytics site id
+(`clarity`, `crazyegg`, `hotjar`, `yandex`); a `payment` without merchant id
+is left out. The same advertising, analytics or payment merchant account on
+two campaigns is the link of who monetizes them.
 
 For `ip`, n is the number of watched domains, all campaigns, that held the
 address over the overlap. Left out:
@@ -190,7 +199,7 @@ hour from its own data only; `computed_at` is `null` before its first run
 since Heimdall started, and the tools then add a `note`. A link is a lead,
 not attribution.
 
-`hd_correlations` takes `min_score` (0 to 1), `kinds` (a subset of the eight;
+`hd_correlations` takes `min_score` (0 to 1), `kinds` (a subset of the nine;
 the score is then computed on those only), `since` (RFC 3339 or a duration
 back from now, 7 days by default) and `charts_only`. It returns `campaigns`,
 `pairs` (`a`, `a_name`, `b`, `b_name`, `score`, `counts` of distinct values
@@ -221,7 +230,7 @@ client to plot, in the same form.
 
 ### Domain enrichment
 
-`hd_domain_enrich` has the Heimdall server, not this client, query four
+`hd_domain_enrich` has the Heimdall server, not this client, query five
 sources about one name, watched or not:
 
 - `dns`: the live records of the name, one answer per qtype, from Heimdall's
@@ -229,14 +238,29 @@ sources about one name, watched or not:
 - `rdap`: the registration, through the IANA RDAP bootstrap: registrar,
   `registration`, `expiration` and `last_changed` (absent when the registry
   gives none), statuses, nameservers, entities;
-- `ct`: the certificates Cert Spotter lists for the zone and below, each with
-  its full `cert_sha256`, capped at 500. Without a Cert Spotter key on the
-  Heimdall side the public API is rate-limited;
+- `ct`: the certificates Cert Spotter and ONYPHE list for the zone and below,
+  merged by full `cert_sha256`, each with `sources` (`certspotter`,
+  `onyphe`), capped at 500. Without a Cert Spotter key on the Heimdall side
+  the public API is rate-limited;
 - `subdomains`: the names below the zone in Heimdall's passive DNS, capped at
-  500.
+  500;
+- `lookyloo`: the captures of the name on the user's self-hosted Lookyloo
+  (`instance`, `captures_found`, `captures_read`, `truncated`, `submitted`:
+  the uuid of the capture this enrichment asked for), with `trackers` (`kind`,
+  `id`, `first_seen`, `last_seen`, `captures`) and `hosts` (`name`,
+  `first_seen`, `last_seen`) aggregated over them. Tracker identifiers are
+  read from the URLs the captured page loaded: `ua`, `ga4`, `gtm`, `gads`
+  (`AW-<n>`), `fbpixel`, `bing_uet`, `payment` (`<provider>` or
+  `<provider>:<merchant id>`), `clarity`, `crazyegg`, `hotjar`, `yandex`.
+  Lookyloo covers only what was captured there: an absence proves nothing.
 
-Each source can fail alone: it is then `null` and its message is in `errors`,
-and `status` is `ok`, `partial` or `error`. The result is stored by Heimdall
+Each source can fail alone: it is then `null` and its message is in `errors`
+(`ct` and `lookyloo` keep what they read before the error), and `status` is
+`ok`, `partial` or `error`. Without Lookyloo configured on Heimdall, `errors`
+holds `"lookyloo": "lookyloo not configured"`, which does not count in
+`status`; the summary says `lookyloo N` or `lookyloo: no capture`. An older
+Heimdall sends neither `sources` nor `lookyloo`, which then comes back
+`null`. The result is stored by Heimdall
 and replaces the previous one. With `wait` (the default) the job is polled
 every 2 seconds, for at most 5 minutes, and the stored enrichment comes back
 with the job's `summary`; a job still running then comes back with
@@ -245,7 +269,10 @@ reads the stored result without querying anything, and fails with a message
 naming `hd_domain_enrich` when the name was never enriched.
 
 Both leave out the graph Heimdall draws from the enrichment unless
-`include_graph` is true.
+`include_graph` is true, and the Lookyloo captures unless `include_captures`
+is true: each capture (`uuid`, `time`, `url`, `title`, `final_url`,
+`redirects`, `hostnames`, `trackers`) then comes with `tree`, its page
+`{instance}/tree/<uuid>`. Identifiers are never truncated.
 
 `hd_link_domain` takes either `campaign` (id or exact name) or
 `new_campaign_name` (with `new_campaign_description`), created first. A name
@@ -344,15 +371,19 @@ hdctl vt-budget
 hdctl enrich www.example.com
 hdctl enrich -no-wait -graph www.example.com
 hdctl enrichment -graph www.example.com
+hdctl enrichment -captures www.example.com
 hdctl link -campaign spynote-2026 www.example.com
 hdctl link -new spynote-2027 -desc 'January wave' www.example.com
 hdctl ns-set ana.ns.cloudflare.com,bob.ns.cloudflare.com
 hdctl correlations
-hdctl correlations -min-score 0.5 -kinds cert,ns_set -since 30d -charts
+hdctl correlations -min-score 0.5 -kinds cert,tracker,ns_set -since 30d -charts
 hdctl correlation-pair -kinds ip,vt spynote-2026 flubot-2026
 ```
 
 `pivots` prints `excluded_cdn` and `ns_pairs` next to `pivots`.
+`enrich` and `enrichment` print the certificates' `sources` and the
+`lookyloo` section (trackers and hosts); `-captures` adds each capture with
+its `tree` link.
 `analytics` takes `-days 30` (the default) or `-days 90`, and `-charts` for
 `campaign`, `days`, `header` and `charts` only.
 `correlations` takes `-min-score`, `-kinds` (comma-separated), `-since` and

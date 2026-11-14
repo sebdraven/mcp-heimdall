@@ -645,7 +645,7 @@ func TestDomainEnrich(t *testing.T) {
 			}
 		})
 		s.poll, s.maxWait = time.Millisecond, cmp.Or(tc.waitFor, 5*time.Second)
-		res, err := s.DomainEnrich(context.Background(), tc.fqdn, tc.wait, tc.includeGraph)
+		res, err := s.DomainEnrich(context.Background(), tc.fqdn, tc.wait, tc.includeGraph, false)
 		// The polls of a wait that ran out are not counted.
 		if got := strings.Join(*reqs, ", "); tc.waitFor == 0 && got != tc.wantReqs {
 			t.Errorf("%s: requests = %q, want %q", tc.desc, got, tc.wantReqs)
@@ -708,7 +708,7 @@ func TestDomainEnrichment(t *testing.T) {
 			}
 			w.Write([]byte(enrichBody))
 		})
-		res, err := s.DomainEnrichment(context.Background(), tc.fqdn, tc.includeGraph)
+		res, err := s.DomainEnrichment(context.Background(), tc.fqdn, tc.includeGraph, false)
 		if got := strings.Join(*reqs, ", "); got != tc.wantReqs {
 			t.Errorf("%s: requests = %q, want %q", tc.desc, got, tc.wantReqs)
 		}
@@ -724,6 +724,122 @@ func TestDomainEnrichment(t *testing.T) {
 		}
 		if e := res.Enrichment; e.Errors["subdomains"] == "" || e.Subdomains != nil || e.CT == nil || e.CT.Certificates[0].CertSHA256 != certSHA256 {
 			t.Errorf("%s: enrichment %+v", tc.desc, e)
+		}
+	}
+}
+
+const (
+	jjspyInstance = "https://lookyloo.example/"
+	jjspyUUID1    = "6f1d8a52-3c4b-4e2a-9b7f-0a1c2d3e4f50"
+	jjspyUUID2    = "b2e4c6a8-1d3f-4a5b-8c7d-9e0f1a2b3c4d"
+	jjspyDone     = `{"job":"domain:jjspy.com","state":"done","started_at":"2026-11-10T08:57:00Z","finished_at":"2026-11-10T09:00:00Z","status":"ok","counts":{"dns":0,"rdap":0,"ct":1,"subdomains":0,"lookyloo":2},"summary":"ok: dns 0, rdap 0, ct 1, subdomains 0, lookyloo 2"}`
+	jjspyTrackers = `"trackers":[{"kind":"bing_uet","id":"343030177","first_seen":"2026-10-02T14:10:00Z","last_seen":"2026-11-10T08:58:00Z","captures":2},` +
+		`{"kind":"ga4","id":"G-9R5NCQVTSZ","first_seen":"2026-11-10T08:58:00Z","last_seen":"2026-11-10T08:58:00Z","captures":1},` +
+		`{"kind":"gads","id":"AW-11021906314","first_seen":"2026-11-10T08:58:00Z","last_seen":"2026-11-10T08:58:00Z","captures":1},` +
+		`{"kind":"ua","id":"UA-132944514-1","first_seen":"2026-11-10T08:58:00Z","last_seen":"2026-11-10T08:58:00Z","captures":1}]`
+)
+
+// jjspyBody is a stored enrichment whose Lookyloo holds captures, given as
+// a JSON list or null.
+func jjspyBody(captures string) string {
+	return `{"fqdn":"jjspy.com","fetched_at":"2026-11-10T09:00:00Z","status":"ok","dns":null,"zone":null,"rdap":null,` +
+		`"ct":{"zone":"jjspy.com","total":1,"certificates":[{"id":"9120344517","cert_sha256":"` + certSHA256 + `","issuer":"R11","not_before":"2026-09-01T00:00:00Z","not_after":"2026-11-30T00:00:00Z","revoked":false,"names":["jjspy.com"],"sources":["certspotter","onyphe"]}],"names":["jjspy.com"],"truncated":false},` +
+		`"subdomains":null,"lookyloo":{"instance":"` + jjspyInstance + `","captures_found":2,"captures_read":2,"truncated":false,"submitted":null,"captures":` + captures + `,` +
+		jjspyTrackers + `,"hosts":[{"name":"www.jjspy.com","first_seen":"2026-10-02T14:10:00Z","last_seen":"2026-11-10T08:58:00Z"}]},"errors":{}}`
+}
+
+const jjspyCaptures = `[{"uuid":"` + jjspyUUID1 + `","time":"2026-11-10T08:58:00Z","url":"https://jjspy.com/","title":"JJSPY","final_url":"https://www.jjspy.com/","redirects":["https://www.jjspy.com/"],` +
+	`"hostnames":["www.jjspy.com","bat.bing.com"],"trackers":[{"kind":"bing_uet","id":"343030177"},{"kind":"ga4","id":"G-9R5NCQVTSZ"},{"kind":"gads","id":"AW-11021906314"},{"kind":"ua","id":"UA-132944514-1"}]},` +
+	`{"uuid":"` + jjspyUUID2 + `","time":"2026-10-02T14:10:00Z","url":"https://www.jjspy.com/pricing","title":"Pricing","final_url":"https://www.jjspy.com/pricing","redirects":[],` +
+	`"hostnames":["www.jjspy.com","bat.bing.com"],"trackers":[{"kind":"bing_uet","id":"343030177"}]}]`
+
+func TestDomainEnrichmentCaptures(t *testing.T) {
+	for _, tc := range []struct {
+		desc            string
+		enrich          bool
+		captures        string
+		includeCaptures bool
+		want, notWant   []string
+		trees           []string
+	}{
+		{
+			desc:     "without captures",
+			captures: jjspyCaptures,
+			want:     []string{jjspyTrackers, `"sources":["certspotter","onyphe"]`, `"hosts":[{"name":"www.jjspy.com"`},
+			notWant:  []string{`"captures":[`, `"uuid":`, `"tree":`},
+		},
+		{
+			desc:            "with captures",
+			captures:        jjspyCaptures,
+			includeCaptures: true,
+			want: []string{jjspyTrackers, `"uuid":"` + jjspyUUID1 + `"`, `"id":"UA-132944514-1"`,
+				`"tree":"https://lookyloo.example/tree/` + jjspyUUID1 + `"`, `"tree":"https://lookyloo.example/tree/` + jjspyUUID2 + `"`},
+			trees: []string{"https://lookyloo.example/tree/" + jjspyUUID1, "https://lookyloo.example/tree/" + jjspyUUID2},
+		},
+		{desc: "with captures, none sent", captures: `null`, includeCaptures: true, want: []string{`"captures":[]`, jjspyTrackers}, trees: []string{}},
+		{
+			desc:     "enrich without captures",
+			enrich:   true,
+			captures: jjspyCaptures,
+			want:     []string{`"lookyloo":2`, `"summary":"ok: dns 0, rdap 0, ct 1, subdomains 0, lookyloo 2"`, jjspyTrackers},
+			notWant:  []string{`"uuid":`, `"tree":`},
+		},
+		{
+			desc:            "enrich with captures",
+			enrich:          true,
+			captures:        jjspyCaptures,
+			includeCaptures: true,
+			want:            []string{`"lookyloo":2`, `"tree":"https://lookyloo.example/tree/` + jjspyUUID2 + `"`},
+			trees:           []string{"https://lookyloo.example/tree/" + jjspyUUID1, "https://lookyloo.example/tree/" + jjspyUUID2},
+		},
+	} {
+		s, _ := stub(t, func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.URL.Path == "/api/domains/jjspy.com/enrich":
+				w.Write([]byte(jjspyBody(tc.captures)))
+			default:
+				w.Write([]byte(jjspyDone))
+			}
+		})
+		var res any
+		var e *heimdall.DomainEnrichment
+		if tc.enrich {
+			r, err := s.DomainEnrich(context.Background(), "jjspy.com", true, false, tc.includeCaptures)
+			if err != nil || r.Summary == nil || r.Summary.Counts.Lookyloo != 2 {
+				t.Errorf("%s: result %+v, %v", tc.desc, r, err)
+				continue
+			}
+			res, e = r, r.Enrichment
+		} else {
+			r, err := s.DomainEnrichment(context.Background(), "jjspy.com", false, tc.includeCaptures)
+			if err != nil {
+				t.Errorf("%s: %v", tc.desc, err)
+				continue
+			}
+			res, e = r, r.Enrichment
+		}
+		if e == nil || e.Lookyloo == nil || len(e.Lookyloo.Trackers) != 4 || len(e.Lookyloo.Hosts) != 1 {
+			t.Errorf("%s: enrichment %+v", tc.desc, e)
+			continue
+		}
+		if got := e.Lookyloo.Captures; (got != nil) != tc.includeCaptures || len(got) != len(tc.trees) {
+			t.Errorf("%s: captures %+v, want %d", tc.desc, got, len(tc.trees))
+		}
+		for i, c := range e.Lookyloo.Captures {
+			if i < len(tc.trees) && c.Tree != tc.trees[i] {
+				t.Errorf("%s: capture %d tree %q, want %q", tc.desc, i, c.Tree, tc.trees[i])
+			}
+		}
+		b, _ := json.Marshal(res)
+		for _, w := range tc.want {
+			if !strings.Contains(string(b), w) {
+				t.Errorf("%s: encoded as %s, lacks %s", tc.desc, b, w)
+			}
+		}
+		for _, w := range tc.notWant {
+			if strings.Contains(string(b), w) {
+				t.Errorf("%s: encoded as %s, holds %s", tc.desc, b, w)
+			}
 		}
 	}
 }

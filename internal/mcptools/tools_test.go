@@ -19,12 +19,19 @@ const (
 		`{"id":5,"name":"FluBot","family":"FluBot","description":"","domains":0,"created_at":"2026-03-01T12:00:00Z"}]`
 	certSHA256    = "8f7a1c52e0b3d94a6c1f2e7b0d5a3c9e4b8f6a2d1c7e5b3a9f0d4c2e6b8a1f3d"
 	enrichRunning = `{"job":"domain:a.example","state":"running","started_at":"2026-03-01T12:00:00Z"}`
-	enrichDone    = `{"job":"domain:a.example","state":"done","started_at":"2026-03-01T12:00:00Z","finished_at":"2026-03-01T12:00:04Z","status":"ok","counts":{"dns":1,"rdap":0,"ct":1,"subdomains":0},"summary":"ok: dns 1, rdap 0, ct 1, subdomains 0"}`
+	enrichDone    = `{"job":"domain:a.example","state":"done","started_at":"2026-03-01T12:00:00Z","finished_at":"2026-03-01T12:00:04Z","status":"ok","counts":{"dns":1,"rdap":0,"ct":1,"subdomains":0,"lookyloo":1},"summary":"ok: dns 1, rdap 0, ct 1, subdomains 0, lookyloo 1"}`
+	captureUUID   = "6f1d8a52-3c4b-4e2a-9b7f-0a1c2d3e4f50"
 	enrichBody    = `{"fqdn":"a.example","fetched_at":"2026-03-01T12:00:04Z","status":"partial",` +
 		`"dns":{"resolver":"9.9.9.9:53","records":[{"qtype":"A","rcode":"NOERROR","ttl":300,"rdata":["192.0.2.1"]}]},` +
 		`"zone":null,"rdap":null,` +
-		`"ct":{"zone":"a.example","total":1,"certificates":[{"id":"7392018311","cert_sha256":"` + certSHA256 + `","issuer":"R11","not_before":"2026-02-01T00:00:00Z","not_after":"2026-05-02T00:00:00Z","revoked":false,"names":["a.example"]}],"names":["a.example"],"truncated":false},` +
+		`"ct":{"zone":"a.example","total":1,"certificates":[{"id":"7392018311","cert_sha256":"` + certSHA256 + `","issuer":"R11","not_before":"2026-02-01T00:00:00Z","not_after":"2026-05-02T00:00:00Z","revoked":false,"names":["a.example"],"sources":["certspotter","onyphe"]}],"names":["a.example"],"truncated":false},` +
 		`"subdomains":{"zone":"a.example","names":[{"name":"www.a.example","first_seen":"2026-02-01T00:00:00Z","last_seen":"2026-03-01T00:00:00Z"}],"truncated":false},` +
+		`"lookyloo":{"instance":"https://lookyloo.example","captures_found":1,"captures_read":1,"truncated":false,"submitted":null,` +
+		`"captures":[{"uuid":"` + captureUUID + `","time":"2026-02-28T10:00:00Z","url":"https://a.example/","title":"A","final_url":"https://a.example/","redirects":[],` +
+		`"hostnames":["a.example","bat.bing.com"],"trackers":[{"kind":"gads","id":"AW-11021906314"},{"kind":"bing_uet","id":"343030177"}]}],` +
+		`"trackers":[{"kind":"bing_uet","id":"343030177","first_seen":"2026-02-28T10:00:00Z","last_seen":"2026-02-28T10:00:00Z","captures":1},` +
+		`{"kind":"gads","id":"AW-11021906314","first_seen":"2026-02-28T10:00:00Z","last_seen":"2026-02-28T10:00:00Z","captures":1}],` +
+		`"hosts":[{"name":"a.example","first_seen":"2026-02-28T10:00:00Z","last_seen":"2026-02-28T10:00:00Z"}]},` +
 		`"errors":{"rdap":"no RDAP server"},` +
 		`"graph":{"nodes":[{"id":"d:a.example","kind":"domain","label":"a.example","watched":false,"campaign":"","href":"/domains/a.example","source":"heimdall"},` +
 		`{"id":"ip:192.0.2.1","kind":"ip","label":"192.0.2.1","watched":false,"campaign":"","href":"/rdata/192.0.2.1","source":"heimdall"}],` +
@@ -118,17 +125,34 @@ func TestNewToolsListed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools: %v", err)
 	}
-	inputs := map[string]string{}
+	inputs, descriptions := map[string]string{}, map[string]string{}
 	for _, tool := range res.Tools {
 		b, _ := json.Marshal(tool.InputSchema)
-		inputs[tool.Name] = string(b)
+		inputs[tool.Name], descriptions[tool.Name] = string(b), tool.Description
+	}
+	for name, terms := range map[string][]string{
+		"hd_domain_enrich":     {"five sources", "lookyloo", "ONYPHE", "sources", "include_captures", "/tree/", "proves nothing", "never truncated", "lookyloo not configured"},
+		"hd_domain_enrichment": {"five sources", "lookyloo", "ONYPHE", "include_captures", "/tree/", "proves nothing"},
+		"hd_correlations":      {"tracker", "<kind>:<id>", "gads", "0.9", "0.6", "monetizes"},
+		"hd_correlation_pair":  {"tracker", "<kind>:<id>", "payment without merchant id", "monetizes"},
+	} {
+		for _, term := range terms {
+			if !strings.Contains(descriptions[name], term) {
+				t.Errorf("%s: description lacks %q", name, term)
+			}
+		}
+	}
+	for _, name := range []string{"hd_correlations", "hd_correlation_pair"} {
+		if !strings.Contains(inputs[name], "cert, tracker, ns_set") {
+			t.Errorf("%s: input schema %s lacks the tracker kind", name, inputs[name])
+		}
 	}
 	for name, params := range map[string][]string{
 		"hd_campaign_analytics": {"campaign", "days", "charts_only"},
 		"hd_correlations":       {"min_score", "kinds", "since", "charts_only"},
 		"hd_correlation_pair":   {"a", "b", "kinds"},
-		"hd_domain_enrich":      {"fqdn", "wait", "include_graph"},
-		"hd_domain_enrichment":  {"fqdn", "include_graph"},
+		"hd_domain_enrich":      {"fqdn", "wait", "include_graph", "include_captures"},
+		"hd_domain_enrichment":  {"fqdn", "include_graph", "include_captures"},
 		"hd_link_domain":        {"fqdn", "campaign", "new_campaign_name", "new_campaign_description"},
 		"hd_ns_set":             {"ns"},
 		"hd_vt_enrich":          {"domain", "campaign", "ip", "depth", "wait"},
@@ -176,8 +200,21 @@ func TestNewTools(t *testing.T) {
 				"GET /api/domains/a.example/enrich": enrichBody,
 			},
 			wantReqs: "POST /api/enrich/domain/a.example, GET /api/domains/a.example/enrich",
-			want:     []string{`"state":"done"`, `"summary":"ok: dns 1, rdap 0, ct 1, subdomains 0"`, `"cert_sha256":"` + certSHA256 + `"`, `"errors":{"rdap":"no RDAP server"}`, `"www.a.example"`},
-			notWant:  []string{`"graph"`},
+			want: []string{`"state":"done"`, `"summary":"ok: dns 1, rdap 0, ct 1, subdomains 0, lookyloo 1"`, `"lookyloo":1`, `"cert_sha256":"` + certSHA256 + `"`,
+				`"sources":["certspotter","onyphe"]`, `"errors":{"rdap":"no RDAP server"}`, `"www.a.example"`, `"id":"AW-11021906314"`, `"id":"343030177"`},
+			notWant: []string{`"graph":`, `"uuid":`, `"tree":`},
+		},
+		{
+			desc: "enrich with the captures",
+			tool: "hd_domain_enrich",
+			args: map[string]any{"fqdn": "a.example", "include_captures": true},
+			replies: map[string]string{
+				"POST /api/enrich/domain/a.example": enrichDone,
+				"GET /api/domains/a.example/enrich": enrichBody,
+			},
+			wantReqs: "POST /api/enrich/domain/a.example, GET /api/domains/a.example/enrich",
+			want:     []string{`"uuid":"` + captureUUID + `"`, `"tree":"https://lookyloo.example/tree/` + captureUUID + `"`, `"final_url":"https://a.example/"`},
+			notWant:  []string{`"graph":`},
 		},
 		{
 			desc: "enrich with the graph",
@@ -197,8 +234,17 @@ func TestNewTools(t *testing.T) {
 			args:     map[string]any{"fqdn": "a.example"},
 			replies:  map[string]string{"GET /api/domains/a.example/enrich": enrichBody},
 			wantReqs: "GET /api/domains/a.example/enrich",
-			want:     []string{`"status":"partial"`, `"cert_sha256":"` + certSHA256 + `"`},
-			notWant:  []string{`"graph"`},
+			want:     []string{`"status":"partial"`, `"cert_sha256":"` + certSHA256 + `"`, `"instance":"https://lookyloo.example"`, `"kind":"gads"`},
+			notWant:  []string{`"graph":`, `"uuid":`, `"tree":`},
+		},
+		{
+			desc:     "enrichment with the captures",
+			tool:     "hd_domain_enrichment",
+			args:     map[string]any{"fqdn": "a.example", "include_captures": true},
+			replies:  map[string]string{"GET /api/domains/a.example/enrich": enrichBody},
+			wantReqs: "GET /api/domains/a.example/enrich",
+			want:     []string{`"tree":"https://lookyloo.example/tree/` + captureUUID + `"`, `"hostnames":["a.example","bat.bing.com"]`},
+			notWant:  []string{`"graph":`},
 		},
 		{
 			desc:     "enrichment with the graph",
@@ -295,6 +341,14 @@ func TestNewTools(t *testing.T) {
 		},
 		{desc: "correlations above score 1", tool: "hd_correlations", args: map[string]any{"min_score": 2}, wantErr: "min_score must be between 0 and 1"},
 		{desc: "correlations of an unknown kind", tool: "hd_correlations", args: map[string]any{"kinds": []string{"dns"}}, wantErr: `unknown kind`},
+		{
+			desc:     "correlations on trackers",
+			tool:     "hd_correlations",
+			args:     map[string]any{"kinds": []string{"tracker"}},
+			replies:  map[string]string{"GET /api/correlations": notComputedReply},
+			wantReqs: "GET /api/correlations",
+			want:     []string{`"computed_at":null`},
+		},
 		{
 			desc:     "correlation pair",
 			tool:     "hd_correlation_pair",
