@@ -348,6 +348,69 @@ func TestCorrelations(t *testing.T) {
 	}
 }
 
+func TestCorrelationKindsTracker(t *testing.T) {
+	if i := slices.Index(CorrelationKinds, "tracker"); i != 1 {
+		t.Errorf("tracker at %d in %v, want second", i, CorrelationKinds)
+	}
+	kinds, err := correlationKinds([]string{" tracker ", "vt", "tracker"})
+	if err != nil || !slices.Equal(kinds, []string{"tracker", "vt"}) {
+		t.Errorf("kinds %v, %v", kinds, err)
+	}
+	if got := kindsOrder(map[string]bool{"vt": true, "ip": true, "tracker": true, "cert": true}); !slices.Equal(got, []string{"cert", "tracker", "ip", "vt"}) {
+		t.Errorf("order %v", got)
+	}
+}
+
+func TestCorrelationsTracker(t *testing.T) {
+	link := func(kind, value, first string) heimdall.CorrelationLink {
+		return heimdall.CorrelationLink{Kind: kind, Value: value, DomainA: "a.example", CampaignA: 2, DomainB: "jjspy.com", CampaignB: 4, FirstSeen: first, LastSeen: "2026-03-01T11:00:00Z"}
+	}
+	c := heimdall.Correlations{
+		Campaigns:  []heimdall.CampaignRef{{ID: 2, Name: "SpyNote"}, {ID: 4, Name: "FluBot"}},
+		Pairs:      []heimdall.CorrelationPair{{A: 2, B: 4, Score: 1, Counts: map[string]int{"ip": 1, "tracker": 2}}},
+		NewLinks:   []heimdall.CorrelationLink{link("ip", "192.0.2.1", "2026-03-01T10:00:00Z"), link("tracker", "gads:AW-11021906314", "2026-02-28T09:00:00Z")},
+		ComputedAt: strp("2026-03-01T11:00:00Z"),
+	}
+	var gotKinds string
+	s, _ := stub(t, func(w http.ResponseWriter, r *http.Request) {
+		gotKinds = r.URL.Query().Get("kinds")
+		json.NewEncoder(w).Encode(c)
+	})
+	res, err := s.Correlations(context.Background(), nil, []string{"tracker", "ip"}, "2d", false)
+	if err != nil {
+		t.Fatalf("Correlations: %v", err)
+	}
+	if gotKinds != "tracker,ip" {
+		t.Errorf("kinds %q", gotKinds)
+	}
+	checkCharts(t, "tracker", res.Charts, []string{"pair_scores", "links_by_kind", "score_matrix", "new_links_by_day"})
+	wantChart(t, "tracker", res.Charts, "links_by_kind", []string{"SpyNote ↔ FluBot"}, []string{"tracker", "ip"}, [][]float64{{2}, {1}})
+	wantChart(t, "tracker", res.Charts, "new_links_by_day", []string{"2026-02-27", "2026-02-28", "2026-03-01"}, []string{"tracker", "ip"}, [][]float64{{0, 1, 0}, {0, 0, 1}})
+	b, _ := json.Marshal(res)
+	if !strings.Contains(string(b), `"kind":"tracker","value":"gads:AW-11021906314"`) {
+		t.Errorf("encoded as %s, lacks the tracker link", b)
+	}
+
+	d := heimdall.CorrelationPairDetail{
+		A: heimdall.CampaignRef{ID: 1, Name: "spynote"}, B: heimdall.CampaignRef{ID: 3, Name: "1"}, Score: 1, Counts: map[string]int{"cert": 1, "tracker": 2},
+		Evidence: []heimdall.CorrelationEvidence{
+			{Kind: "tracker", Value: "bing_uet:343030177", CampaignA: 1, CampaignB: 3, Weight: 1},
+			{Kind: "cert", Value: corrSHA256, CampaignA: 1, CampaignB: 3, Weight: 1},
+			{Kind: "tracker", Value: "ga4:G-9R5NCQVTSZ", CampaignA: 1, CampaignB: 3, Weight: 0.9},
+		},
+		ComputedAt: strp("2026-03-01T11:00:00Z"),
+	}
+	s, _ = stub(t, func(w http.ResponseWriter, r *http.Request) { json.NewEncoder(w).Encode(d) })
+	pair, err := s.CorrelationPair(context.Background(), "spynote", "3", []string{"tracker", "cert"})
+	if err != nil {
+		t.Fatalf("CorrelationPair: %v", err)
+	}
+	wantChart(t, "tracker pair", pair.Charts, "evidence_by_kind", []string{"cert", "tracker"}, []string{"links", "max weight"}, [][]float64{{1, 2}, {1, 1}})
+	if e := pair.Evidence; len(e) != 3 || e[0].Value != "bing_uet:343030177" || e[0].CampaignAName != "spynote" {
+		t.Errorf("evidence %+v", e)
+	}
+}
+
 func correlationPairFixture() heimdall.CorrelationPairDetail {
 	ev := func(kind, value, b string, w float64) heimdall.CorrelationEvidence {
 		return heimdall.CorrelationEvidence{Kind: kind, Value: value, DomainA: "a.example", CampaignA: 1, DomainB: b, CampaignB: 3, Weight: w}

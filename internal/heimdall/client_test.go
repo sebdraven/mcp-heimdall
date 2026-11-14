@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -438,12 +439,16 @@ func TestEnrichJobSummary(t *testing.T) {
 		{body: `{"state":"none"}`},
 		{body: `{"job":"domain:a.example","state":"running","started_at":"2026-03-01T12:00:00Z"}`},
 		{
-			body:    `{"job":"domain:a.example","state":"done","started_at":"2026-03-01T12:00:00Z","finished_at":"2026-03-01T12:00:05Z","status":"ok","counts":{"dns":4,"rdap":1,"ct":12,"subdomains":3},"summary":"ok: dns 4, rdap 1, ct 12, subdomains 3"}`,
-			summary: &EnrichSummary{Status: "ok", Counts: EnrichCounts{DNS: 4, RDAP: 1, CT: 12, Subdomains: 3}, Summary: "ok: dns 4, rdap 1, ct 12, subdomains 3"},
+			body:    `{"job":"domain:a.example","state":"done","started_at":"2026-03-01T12:00:00Z","finished_at":"2026-03-01T12:00:05Z","status":"ok","counts":{"dns":4,"rdap":1,"ct":12,"subdomains":3,"lookyloo":2},"summary":"ok: dns 4, rdap 1, ct 12, subdomains 3, lookyloo 2"}`,
+			summary: &EnrichSummary{Status: "ok", Counts: EnrichCounts{DNS: 4, RDAP: 1, CT: 12, Subdomains: 3, Lookyloo: 2}, Summary: "ok: dns 4, rdap 1, ct 12, subdomains 3, lookyloo 2"},
 		},
 		{
-			body:    `{"job":"domain:a.example","state":"failed","started_at":"2026-03-01T12:00:00Z","finished_at":"2026-03-01T12:00:05Z","status":"partial","counts":{"dns":4,"rdap":0,"ct":0,"subdomains":0},"errors":{"ct":"rate limited","rdap":"no RDAP server"},"summary":"partial: dns 4, rdap failed, ct failed, subdomains 0","error":"internal error"}`,
-			summary: &EnrichSummary{Status: "partial", Counts: EnrichCounts{DNS: 4}, Errors: map[string]string{"ct": "rate limited", "rdap": "no RDAP server"}, Summary: "partial: dns 4, rdap failed, ct failed, subdomains 0"},
+			body:    `{"job":"domain:a.example","state":"done","started_at":"2026-03-01T12:00:00Z","finished_at":"2026-03-01T12:00:05Z","status":"ok","counts":{"dns":4,"rdap":1,"ct":12,"subdomains":3,"lookyloo":0},"errors":{"lookyloo":"lookyloo not configured"},"summary":"ok: dns 4, rdap 1, ct 12, subdomains 3, lookyloo: no capture"}`,
+			summary: &EnrichSummary{Status: "ok", Counts: EnrichCounts{DNS: 4, RDAP: 1, CT: 12, Subdomains: 3}, Errors: map[string]string{"lookyloo": "lookyloo not configured"}, Summary: "ok: dns 4, rdap 1, ct 12, subdomains 3, lookyloo: no capture"},
+		},
+		{
+			body:    `{"job":"domain:a.example","state":"failed","started_at":"2026-03-01T12:00:00Z","finished_at":"2026-03-01T12:00:05Z","status":"partial","counts":{"dns":4,"rdap":0,"ct":0,"subdomains":0,"lookyloo":0},"errors":{"ct":"rate limited","rdap":"no RDAP server"},"summary":"partial: dns 4, rdap failed, ct failed, subdomains 0, lookyloo: no capture","error":"internal error"}`,
+			summary: &EnrichSummary{Status: "partial", Counts: EnrichCounts{DNS: 4}, Errors: map[string]string{"ct": "rate limited", "rdap": "no RDAP server"}, Summary: "partial: dns 4, rdap failed, ct failed, subdomains 0, lookyloo: no capture"},
 			errMsg:  "internal error",
 		},
 	} {
@@ -512,6 +517,65 @@ func TestDomainEnrichment(t *testing.T) {
 	}
 	if strings.Contains(string(b), "last_changed") {
 		t.Errorf("an absent RDAP date was re-encoded: %s", b)
+	}
+	if strings.Contains(string(b), `"sources":`) || strings.Contains(string(b), `"captures":`) || !strings.Contains(string(b), `"lookyloo":null`) {
+		t.Errorf("absent sources or lookyloo re-encoded as %s", b)
+	}
+}
+
+// jjspyEnrichment holds the trackers the Lookyloo captures of jjspy.com
+// loaded, in the order Heimdall encodes its fields.
+const jjspyEnrichment = `{"fqdn":"jjspy.com","fetched_at":"2026-11-10T09:00:00Z","status":"ok","dns":null,"zone":null,"rdap":null,` +
+	`"ct":{"zone":"jjspy.com","total":1,"certificates":[{"id":"9120344517","cert_sha256":"` + certSHA256 + `","issuer":"R11","not_before":"2026-09-01T00:00:00Z","not_after":"2026-11-30T00:00:00Z","revoked":false,"names":["jjspy.com","www.jjspy.com"],"sources":["certspotter","onyphe"]}],"names":["jjspy.com","www.jjspy.com"],"truncated":false},` +
+	`"subdomains":null,` +
+	`"lookyloo":{"instance":"https://lookyloo.example","captures_found":2,"captures_read":2,"truncated":false,"submitted":"6f1d8a52-3c4b-4e2a-9b7f-0a1c2d3e4f50",` +
+	`"captures":[{"uuid":"6f1d8a52-3c4b-4e2a-9b7f-0a1c2d3e4f50","time":"2026-11-10T08:58:00Z","url":"https://jjspy.com/","title":"JJSPY","final_url":"https://www.jjspy.com/","redirects":["https://www.jjspy.com/"],` +
+	`"hostnames":["www.jjspy.com","www.googletagmanager.com","bat.bing.com","www.google-analytics.com"],` +
+	`"trackers":[{"kind":"bing_uet","id":"343030177"},{"kind":"ga4","id":"G-9R5NCQVTSZ"},{"kind":"gads","id":"AW-11021906314"},{"kind":"ua","id":"UA-132944514-1"}]},` +
+	`{"uuid":"b2e4c6a8-1d3f-4a5b-8c7d-9e0f1a2b3c4d","time":"2026-10-02T14:10:00Z","url":"https://www.jjspy.com/pricing","title":"Pricing","final_url":"https://www.jjspy.com/pricing","redirects":[],` +
+	`"hostnames":["www.jjspy.com","bat.bing.com"],"trackers":[{"kind":"bing_uet","id":"343030177"}]}],` +
+	`"trackers":[{"kind":"bing_uet","id":"343030177","first_seen":"2026-10-02T14:10:00Z","last_seen":"2026-11-10T08:58:00Z","captures":2},` +
+	`{"kind":"ga4","id":"G-9R5NCQVTSZ","first_seen":"2026-11-10T08:58:00Z","last_seen":"2026-11-10T08:58:00Z","captures":1},` +
+	`{"kind":"gads","id":"AW-11021906314","first_seen":"2026-11-10T08:58:00Z","last_seen":"2026-11-10T08:58:00Z","captures":1},` +
+	`{"kind":"ua","id":"UA-132944514-1","first_seen":"2026-11-10T08:58:00Z","last_seen":"2026-11-10T08:58:00Z","captures":1}],` +
+	`"hosts":[{"name":"www.jjspy.com","first_seen":"2026-10-02T14:10:00Z","last_seen":"2026-11-10T08:58:00Z"}]},` +
+	`"errors":{}}`
+
+func TestDomainEnrichmentLookyloo(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(jjspyEnrichment))
+	}))
+	defer srv.Close()
+
+	e, err := New(srv.URL, "TOK").DomainEnrichment(context.Background(), "jjspy.com")
+	if err != nil {
+		t.Fatalf("DomainEnrichment: %v", err)
+	}
+	if e.CT == nil || len(e.CT.Certificates) != 1 || strings.Join(e.CT.Certificates[0].Sources, ",") != "certspotter,onyphe" {
+		t.Errorf("ct = %+v", e.CT)
+	}
+	l := e.Lookyloo
+	if l == nil || l.Instance != "https://lookyloo.example" || l.CapturesFound != 2 || l.CapturesRead != 2 || l.Truncated ||
+		l.Submitted == nil || *l.Submitted != "6f1d8a52-3c4b-4e2a-9b7f-0a1c2d3e4f50" || len(l.Captures) != 2 || len(l.Hosts) != 1 {
+		t.Fatalf("lookyloo = %+v", l)
+	}
+	var got []string
+	for _, tr := range l.Trackers {
+		got = append(got, tr.Kind+":"+tr.ID+":"+strconv.Itoa(tr.Captures))
+	}
+	if want := "bing_uet:343030177:2 ga4:G-9R5NCQVTSZ:1 gads:AW-11021906314:1 ua:UA-132944514-1:1"; strings.Join(got, " ") != want {
+		t.Errorf("trackers %q, want %q", got, want)
+	}
+	if c := l.Captures[0]; c.FinalURL != "https://www.jjspy.com/" || len(c.Redirects) != 1 || len(c.Hostnames) != 4 ||
+		len(c.Trackers) != 4 || c.Trackers[2] != (Tracker{Kind: "gads", ID: "AW-11021906314"}) || c.Tree != "" {
+		t.Errorf("capture 0 = %+v", c)
+	}
+	if l.Trackers[0].FirstSeen != "2026-10-02T14:10:00Z" || l.Hosts[0].LastSeen != "2026-11-10T08:58:00Z" {
+		t.Errorf("dates %+v %+v", l.Trackers[0], l.Hosts[0])
+	}
+	b, _ := json.Marshal(e)
+	if string(b) != jjspyEnrichment {
+		t.Errorf("decoded and encoded back as\n%s\nwant\n%s", b, jjspyEnrichment)
 	}
 }
 

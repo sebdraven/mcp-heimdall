@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -620,10 +621,28 @@ func normalizeFQDN(v string) (string, error) {
 	return n, nil
 }
 
-// enrichment drops the graph of e unless asked for.
-func enrichment(e heimdall.DomainEnrichment, includeGraph bool) *heimdall.DomainEnrichment {
+// enrichment drops the graph and the Lookyloo captures of e unless asked for,
+// and links each capture kept to its page on the instance.
+func enrichment(e heimdall.DomainEnrichment, includeGraph, includeCaptures bool) *heimdall.DomainEnrichment {
 	if !includeGraph {
 		e.Graph = nil
+	}
+	if e.Lookyloo != nil {
+		l := *e.Lookyloo
+		if includeCaptures {
+			l.Captures = slices.Clone(l.Captures)
+			if l.Captures == nil {
+				l.Captures = []heimdall.LookylooCapture{}
+			}
+			for i, c := range l.Captures {
+				if l.Instance != "" && c.UUID != "" {
+					l.Captures[i].Tree = strings.TrimSuffix(l.Instance, "/") + "/tree/" + url.PathEscape(c.UUID)
+				}
+			}
+		} else {
+			l.Captures = nil
+		}
+		e.Lookyloo = &l
 	}
 	return &e
 }
@@ -638,7 +657,7 @@ func notEnrichedErr(err error) error {
 // DomainEnrich enriches fqdn. With wait it polls the job like VTEnrich and,
 // once done, reads the stored enrichment back; a job still running then
 // comes back with a note and no enrichment.
-func (s *Service) DomainEnrich(ctx context.Context, fqdn string, wait, includeGraph bool) (DomainEnrichResult, error) {
+func (s *Service) DomainEnrich(ctx context.Context, fqdn string, wait, includeGraph, includeCaptures bool) (DomainEnrichResult, error) {
 	fqdn, err := normalizeFQDN(fqdn)
 	if err != nil {
 		return DomainEnrichResult{}, err
@@ -664,7 +683,7 @@ func (s *Service) DomainEnrich(ctx context.Context, fqdn string, wait, includeGr
 		if err != nil {
 			return res, notEnrichedErr(err)
 		}
-		res.Enrichment = enrichment(e, includeGraph)
+		res.Enrichment = enrichment(e, includeGraph, includeCaptures)
 	}
 	res.FetchedAt, res.State, res.Error = s.stamp(), job.State, job.Error
 	res.StartedAt, res.FinishedAt, res.Summary = job.StartedAt, job.FinishedAt, job.EnrichSummary
@@ -672,7 +691,7 @@ func (s *Service) DomainEnrich(ctx context.Context, fqdn string, wait, includeGr
 }
 
 // DomainEnrichment reads the last enrichment of fqdn.
-func (s *Service) DomainEnrichment(ctx context.Context, fqdn string, includeGraph bool) (DomainEnrichmentResult, error) {
+func (s *Service) DomainEnrichment(ctx context.Context, fqdn string, includeGraph, includeCaptures bool) (DomainEnrichmentResult, error) {
 	fqdn, err := normalizeFQDN(fqdn)
 	if err != nil {
 		return DomainEnrichmentResult{}, err
@@ -681,7 +700,7 @@ func (s *Service) DomainEnrichment(ctx context.Context, fqdn string, includeGrap
 	if err != nil {
 		return DomainEnrichmentResult{}, notEnrichedErr(err)
 	}
-	return DomainEnrichmentResult{FQDN: fqdn, FetchedAt: s.stamp(), Enrichment: enrichment(e, includeGraph)}, nil
+	return DomainEnrichmentResult{FQDN: fqdn, FetchedAt: s.stamp(), Enrichment: enrichment(e, includeGraph, includeCaptures)}, nil
 }
 
 // LinkDomain puts fqdn in a campaign, given exactly one of campaign (id or

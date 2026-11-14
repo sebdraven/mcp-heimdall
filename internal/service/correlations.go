@@ -13,7 +13,7 @@ import (
 )
 
 // CorrelationKinds are Heimdall's kinds of link, strongest first.
-var CorrelationKinds = []string{"cert", "ns_set", "ip", "cname", "mx", "soa", "rdap", "vt"}
+var CorrelationKinds = []string{"cert", "tracker", "ns_set", "ip", "cname", "mx", "soa", "rdap", "vt"}
 
 const (
 	topPairs       = 15

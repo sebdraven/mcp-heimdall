@@ -43,8 +43,16 @@ const (
 	termVTCache = "Read from Heimdall's cache only: this never calls VirusTotal nor spends its budget. " +
 		"An error if Heimdall has no VirusTotal configured. "
 
+	termLookyloo = "Lookyloo is the user's self-hosted instance, not a public service: it covers only what was captured there, so a tracker, host or name absent from it proves nothing. " +
+		"Tracker identifiers are read from the URLs the captured page loaded, by kind: ua, ga4 and gtm (Google Analytics and Tag Manager), gads (Google Ads, AW-<n>), fbpixel (Meta pixel), " +
+		"bing_uet (Microsoft Advertising UET), payment (\"<provider>\" or \"<provider>:<merchant id>\"), clarity, crazyegg, hotjar, yandex (Metrica). " +
+		"Identifiers, uuids and SHA-256 values are given whole, never truncated. "
+
 	termCorrelation = "Heimdall links two domains of two different campaigns when they share a piece of infrastructure, each link of one kind and weight: " +
 		"cert (1.0): the same certificate, by its full SHA-256, among the stored enrichments (hd_domain_enrich); " +
+		"tracker: the same tracker identifier among the Lookyloo captures of the stored enrichments, weighing 1.0 for an advertising or payment account (gads, fbpixel, bing_uet, payment with a merchant id), " +
+		"0.9 for a Google Analytics or Tag Manager property (gtm, ga4, ua) and 0.6 for another analytics site id (clarity, crazyegg, hotjar, yandex), a payment without merchant id left out: " +
+		"the same advertising, analytics or payment merchant account on two campaigns is the link of who monetizes them; " +
 		"ns_set (0.9): the same current NS set of at least 2 nameservers, strictly equal, on different zones; " +
 		"ip (0.8/n): the same A or AAAA address over overlapping passive DNS periods, n being the number of watched domains, all campaigns, that held it over that overlap; " +
 		"cname (0.7): the same CNAME target; mx (0.5): the same MX host; soa (0.4): the same SOA mname and rname, on different zones; " +
@@ -56,7 +64,7 @@ const (
 		"the SOA defaults of large DNS providers (Cloudflare, AWS, Azure, GoDaddy, Namecheap and others); any value held by more than 100 watched domains. " +
 		"The score of a pair of campaigns is 1 − Π(1 − weight) over its distinct values (kind, value), each at its highest weight, capped at 1: " +
 		"a cert alone gives 1, an ns_set and an mx give 1 − 0.1 × 0.5 = 0.95. " +
-		"value is what is shared: the full SHA-256 for cert, the nameservers joined by commas for ns_set, the address for ip and vt, the target or host name for cname and mx, " +
+		"value is what is shared: the full SHA-256 for cert, \"<kind>:<id>\" for tracker (e.g. gads:AW-11021906314, ga4:G-9R5NCQVTSZ), the nameservers joined by commas for ns_set, the address for ip and vt, the target or host name for cname and mx, " +
 		"mname and rname separated by a space for soa, the registrar for rdap. " +
 		"Heimdall computes the links every hour from its own data only, querying nothing outside; computed_at is when, null before its first run since Heimdall started. " +
 		"A link is a lead, not attribution: a registrar or hosting provider can link unrelated operators. "
@@ -212,16 +220,23 @@ func Register(s *mcp.Server, svc *service.Service) {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "hd_domain_enrich",
-		Description: "Enrich one name on demand, watched or not, from four sources queried by the Heimdall server, not by this client: " +
+		Description: "Enrich one name on demand, watched or not, from five sources queried by the Heimdall server, not by this client: " +
 			"dns: its live records (one answer per qtype: rcode, TTL, rdata) from Heimdall's first active resolver, with zone, the zone found (name, SOA, NS); " +
 			"rdap: its registration through the IANA RDAP bootstrap (registrar, registration, expiration and last_changed dates, statuses, nameservers, entities); " +
-			"ct: the certificates Cert Spotter lists for the zone and below (issuer, validity, revoked, names, cert_sha256 as a full SHA-256), capped at 500; " +
-			"subdomains: the names below the zone in Heimdall's own passive DNS (first_seen, last_seen), capped at 500. " +
-			"Each source can fail alone: it is then null and its message is in errors, and status is ok, partial (some failed) or error (all failed). " +
+			"ct: the certificates Cert Spotter and ONYPHE list for the zone and below, merged by full SHA-256 (issuer, validity, revoked, names, cert_sha256 as a full SHA-256, " +
+			"sources: which of certspotter and onyphe listed the certificate), capped at 500; " +
+			"subdomains: the names below the zone in Heimdall's own passive DNS (first_seen, last_seen), capped at 500; " +
+			"lookyloo: the captures of the name on the user's Lookyloo instance, latest first: instance, captures_found, captures_read, truncated, " +
+			"submitted (the uuid of the capture this enrichment asked for, null if none), trackers {kind, id, first_seen, last_seen, captures: how many captures loaded it} " +
+			"and hosts {name, first_seen, last_seen} aggregated over the captures read. " +
+			"The captures themselves are left out unless include_captures is true: each then {uuid, time, url, title, final_url, redirects, hostnames, trackers {kind, id}, " +
+			"tree: its page on the instance, {instance}/tree/<uuid>}. " + termLookyloo +
+			"Each source can fail alone: it is then null and its message is in errors (ct and lookyloo keep what they read before the error), " +
+			"and status is ok, partial (some failed) or error (all failed); without Lookyloo configured on Heimdall, errors holds lookyloo: \"lookyloo not configured\", which does not count in status. " +
 			"Cert Spotter without an API key on the Heimdall side is rate-limited, so ct is the source most likely to fail. " +
 			"The result is stored by Heimdall and replaces the previous one; hd_domain_enrichment reads it back without querying anything. " +
 			"With wait (default true) the job is polled every 2 s until done or failed, for at most 5 minutes, then the stored enrichment is returned with the job " +
-			"(summary: status, counts per source, errors, a one-line summary); a job still running then comes back with state running, enrichment null and a note, " +
+			"(summary: status, counts per source, errors, a one-line summary, e.g. lookyloo 3 or lookyloo: no capture); a job still running then comes back with state running, enrichment null and a note, " +
 			"a failed job (Heimdall could not store the result) with its error and enrichment null. " +
 			"Without wait the started job comes back at once, enrichment null. Enriching a name whose enrichment is running returns that job rather than starting another. " +
 			"The graph Heimdall draws from the enrichment (addresses, CNAME and MX targets, NS set, subdomains, certificate names) is left out unless include_graph is true. " +
@@ -230,9 +245,12 @@ func Register(s *mcp.Server, svc *service.Service) {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "hd_domain_enrichment",
-		Description: "The last enrichment Heimdall stored for a name (dns, zone, rdap, ct, subdomains, errors, status, fetched_at being when it ran), read only: nothing is queried. " +
+		Description: "The last enrichment Heimdall stored for a name from the five sources of hd_domain_enrich " +
+			"(dns with zone, rdap, ct from Cert Spotter and ONYPHE merged by full SHA-256, subdomains, lookyloo; errors, status, fetched_at being when it ran), read only: nothing is queried. " +
 			"An error naming hd_domain_enrich when the name was never enriched. " +
-			"Certificates carry cert_sha256 as a full SHA-256. The graph is left out unless include_graph is true.",
+			"Certificates carry cert_sha256 as a full SHA-256 and sources (certspotter, onyphe). " +
+			"lookyloo holds its trackers and hosts aggregated over the captures; the captures are left out unless include_captures is true, each then with tree, its page {instance}/tree/<uuid>. " +
+			termLookyloo + "The graph is left out unless include_graph is true.",
 	}, r.domainEnrichment)
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -274,7 +292,7 @@ func Register(s *mcp.Server, svc *service.Service) {
 			termCorrelation +
 			"Returns a and b {id, name}, score and counts as in hd_correlations, and evidence: the current links, highest weight first then latest first_seen, " +
 			"{kind, value, domain_a, campaign_a, campaign_a_name, domain_b, campaign_b, campaign_b_name, weight, period, first_seen, last_seen}; " +
-			"period {first, last} is when both domains held the value, the validity of the certificate for cert, the two registration dates for rdap; " +
+			"period {first, last} is when both domains held the value (for tracker, when the captures of both loaded it), the validity of the certificate for cert, the two registration dates for rdap; " +
 			"first_seen and last_seen are when Heimdall's hourly computation first and last found the link. " +
 			"past: the links of the pair's history no longer found, newest last_seen first. " +
 			termCorrelationCharts +
@@ -360,14 +378,16 @@ type vtEnrichInput struct {
 type vtBudgetInput struct{}
 
 type domainEnrichInput struct {
-	FQDN         string `json:"fqdn" jsonschema:"domain name, watched or not"`
-	Wait         *bool  `json:"wait,omitempty" jsonschema:"poll the job until it ends, at most 5 minutes, and return the enrichment (default true)"`
-	IncludeGraph bool   `json:"include_graph,omitempty" jsonschema:"also return the graph drawn from the enrichment (default false)"`
+	FQDN            string `json:"fqdn" jsonschema:"domain name, watched or not"`
+	Wait            *bool  `json:"wait,omitempty" jsonschema:"poll the job until it ends, at most 5 minutes, and return the enrichment (default true)"`
+	IncludeGraph    bool   `json:"include_graph,omitempty" jsonschema:"also return the graph drawn from the enrichment (default false)"`
+	IncludeCaptures bool   `json:"include_captures,omitempty" jsonschema:"also return each Lookyloo capture with its tree link (default false: trackers and hosts only)"`
 }
 
 type domainEnrichmentInput struct {
-	FQDN         string `json:"fqdn" jsonschema:"domain name"`
-	IncludeGraph bool   `json:"include_graph,omitempty" jsonschema:"also return the graph drawn from the enrichment (default false)"`
+	FQDN            string `json:"fqdn" jsonschema:"domain name"`
+	IncludeGraph    bool   `json:"include_graph,omitempty" jsonschema:"also return the graph drawn from the enrichment (default false)"`
+	IncludeCaptures bool   `json:"include_captures,omitempty" jsonschema:"also return each Lookyloo capture with its tree link (default false: trackers and hosts only)"`
 }
 
 type linkDomainInput struct {
@@ -383,7 +403,7 @@ type nsSetInput struct {
 
 type correlationsInput struct {
 	MinScore   *float64 `json:"min_score,omitempty" jsonschema:"lowest score of the pairs returned, 0 to 1 (default 0)"`
-	Kinds      []string `json:"kinds,omitempty" jsonschema:"kinds of link to keep among cert, ns_set, ip, cname, mx, soa, rdap, vt (default all)"`
+	Kinds      []string `json:"kinds,omitempty" jsonschema:"kinds of link to keep among cert, tracker, ns_set, ip, cname, mx, soa, rdap, vt (default all)"`
 	Since      string   `json:"since,omitempty" jsonschema:"start of new_links: RFC 3339 instant or duration back from now: 90m, 24h, 7d (default 7d)"`
 	ChartsOnly bool     `json:"charts_only,omitempty" jsonschema:"return only computed_at, campaigns and charts (default false)"`
 }
@@ -391,7 +411,7 @@ type correlationsInput struct {
 type correlationPairInput struct {
 	A     string   `json:"a" jsonschema:"campaign id or exact, case-sensitive name"`
 	B     string   `json:"b" jsonschema:"another campaign, id or exact, case-sensitive name"`
-	Kinds []string `json:"kinds,omitempty" jsonschema:"kinds of link to keep among cert, ns_set, ip, cname, mx, soa, rdap, vt (default all)"`
+	Kinds []string `json:"kinds,omitempty" jsonschema:"kinds of link to keep among cert, tracker, ns_set, ip, cname, mx, soa, rdap, vt (default all)"`
 }
 
 func (r *registry) pdnsQuery(ctx context.Context, _ *mcp.CallToolRequest, in pdnsInput) (*mcp.CallToolResult, service.PDNSResult, error) {
@@ -470,12 +490,12 @@ func (r *registry) vtBudget(ctx context.Context, _ *mcp.CallToolRequest, _ vtBud
 }
 
 func (r *registry) domainEnrich(ctx context.Context, _ *mcp.CallToolRequest, in domainEnrichInput) (*mcp.CallToolResult, service.DomainEnrichResult, error) {
-	res, err := r.svc.DomainEnrich(ctx, in.FQDN, in.Wait == nil || *in.Wait, in.IncludeGraph)
+	res, err := r.svc.DomainEnrich(ctx, in.FQDN, in.Wait == nil || *in.Wait, in.IncludeGraph, in.IncludeCaptures)
 	return nil, res, err
 }
 
 func (r *registry) domainEnrichment(ctx context.Context, _ *mcp.CallToolRequest, in domainEnrichmentInput) (*mcp.CallToolResult, service.DomainEnrichmentResult, error) {
-	res, err := r.svc.DomainEnrichment(ctx, in.FQDN, in.IncludeGraph)
+	res, err := r.svc.DomainEnrichment(ctx, in.FQDN, in.IncludeGraph, in.IncludeCaptures)
 	return nil, res, err
 }
 
