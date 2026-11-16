@@ -56,6 +56,7 @@ need a Heimdall at or after
 | `hd_vt_budget` | the VirusTotal lookups of the UTC day: budget, used, remaining |
 | `hd_domain_enrich` | enrich one name now from five sources: live DNS and zone, RDAP, Cert Spotter and ONYPHE certificates, subdomains from passive DNS, Lookyloo captures and their trackers; stored by Heimdall |
 | `hd_domain_enrichment` | the last stored enrichment of a name, read only |
+| `hd_trackers` | the Lookyloo trackers of the stored enrichments of a campaign's domains and/or a list of names (at most 200), and the identifiers they share, within a campaign or across; read only |
 | `hd_link_domain` | put a name in a campaign, existing or created on the way: added to the watchlist, moved, or unchanged |
 | `hd_ns_set` | which names have exactly this NS set (2 to 16 nameservers) |
 

@@ -135,6 +135,7 @@ func TestNewToolsListed(t *testing.T) {
 		"hd_domain_enrichment": {"five sources", "lookyloo", "ONYPHE", "include_captures", "/tree/", "proves nothing"},
 		"hd_correlations":      {"tracker", "<kind>:<id>", "gads", "0.9", "0.6", "monetizes"},
 		"hd_correlation_pair":  {"tracker", "<kind>:<id>", "payment without merchant id", "monetizes"},
+		"hd_trackers":          {"adsense", "jivosite", "hd_correlations"},
 	} {
 		for _, term := range terms {
 			if !strings.Contains(descriptions[name], term) {
@@ -155,6 +156,7 @@ func TestNewToolsListed(t *testing.T) {
 		"hd_domain_enrichment":  {"fqdn", "include_graph", "include_captures"},
 		"hd_link_domain":        {"fqdn", "campaign", "new_campaign_name", "new_campaign_description"},
 		"hd_ns_set":             {"ns"},
+		"hd_trackers":           {"campaign", "fqdns"},
 		"hd_vt_enrich":          {"domain", "campaign", "ip", "depth", "wait"},
 	} {
 		schema, ok := inputs[name]
