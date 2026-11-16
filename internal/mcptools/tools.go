@@ -45,12 +45,13 @@ const (
 
 	termLookyloo = "Lookyloo is the user's self-hosted instance, not a public service: it covers only what was captured there, so a tracker, host or name absent from it proves nothing. " +
 		"Tracker identifiers are read from the URLs the captured page loaded, by kind: ua, ga4 and gtm (Google Analytics and Tag Manager), gads (Google Ads, AW-<n>), fbpixel (Meta pixel), " +
-		"bing_uet (Microsoft Advertising UET), payment (\"<provider>\" or \"<provider>:<merchant id>\"), clarity, crazyegg, hotjar, yandex (Metrica). " +
+		"bing_uet (Microsoft Advertising UET), payment (\"<provider>\" or \"<provider>:<merchant id>\"), clarity, crazyegg, hotjar, yandex (Metrica), " +
+		"adsense (Google AdSense), twitter (X/Twitter), jivosite (JivoSite). " +
 		"Identifiers, uuids and SHA-256 values are given whole, never truncated. "
 
 	termCorrelation = "Heimdall links two domains of two different campaigns when they share a piece of infrastructure, each link of one kind and weight: " +
 		"cert (1.0): the same certificate, by its full SHA-256, among the stored enrichments (hd_domain_enrich); " +
-		"tracker: the same tracker identifier among the Lookyloo captures of the stored enrichments, weighing 1.0 for an advertising or payment account (gads, fbpixel, bing_uet, payment with a merchant id), " +
+		"tracker: the same tracker identifier among the Lookyloo captures of the stored enrichments, weighing 1.0 for an advertising, chat or payment account (gads, fbpixel, bing_uet, adsense, twitter, jivosite, payment with a merchant id), " +
 		"0.9 for a Google Analytics or Tag Manager property (gtm, ga4, ua) and 0.6 for another analytics site id (clarity, crazyegg, hotjar, yandex), a payment without merchant id left out: " +
 		"the same advertising, analytics or payment merchant account on two campaigns is the link of who monetizes them; " +
 		"ns_set (0.9): the same current NS set of at least 2 nameservers, strictly equal, on different zones; " +
