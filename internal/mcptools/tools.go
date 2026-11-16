@@ -254,6 +254,21 @@ func Register(s *mcp.Server, svc *service.Service) {
 	}, r.domainEnrichment)
 
 	mcp.AddTool(s, &mcp.Tool{
+		Name: "hd_trackers",
+		Description: "The Lookyloo trackers of the stored enrichments of a campaign's domains (id or exact, case-sensitive name), of fqdns, or of both, at most 200 names, " +
+			"and the identifiers they share; read only: nothing is queried, the enrichments are those hd_domain_enrich stored. " +
+			"domains, sorted by fqdn, holds one row per enriched name: {fqdn, campaign (empty for a name not watched), enriched_at (when the enrichment ran), lookyloo_error, " +
+			"captures_found, captures_read, truncated, trackers {kind, id, captures, first_seen, last_seen}}; hosts, captures and certificates are left out (hd_domain_enrichment has them). " +
+			"shared lists the identifiers held by at least two of the names, {value: \"<kind>:<id>\", kind, id, domains}, most domains first, " +
+			"within one campaign as well as across campaigns, whereas hd_correlations links different campaigns only. " +
+			"lookyloo_error is the message of a Lookyloo source that failed during the enrichment: re-enrich the name with hd_domain_enrich before reading a tracker as absent; " +
+			"a row without lookyloo_error and with captures_found 0 (counted in no_capture) is a name never captured on the instance. " +
+			"not_enriched lists the names never enriched, failed {fqdn, error} those whose enrichment could not be read; " +
+			"counts gives names, enriched, not_enriched, failed, lookyloo_error, no_capture and with_trackers. " +
+			termLookyloo,
+	}, r.trackers)
+
+	mcp.AddTool(s, &mcp.Tool{
 		Name: "hd_link_domain",
 		Description: "Put a name in a campaign: give either campaign (id or exact, case-sensitive name) or new_campaign_name, a campaign created first (with new_campaign_description). " +
 			"A name not watched is added to the watchlist with the default interval, its measurements starting at the collector's next cycle; a watched name is moved to the campaign. " +
@@ -390,6 +405,11 @@ type domainEnrichmentInput struct {
 	IncludeCaptures bool   `json:"include_captures,omitempty" jsonschema:"also return each Lookyloo capture with its tree link (default false: trackers and hosts only)"`
 }
 
+type trackersInput struct {
+	Campaign string   `json:"campaign,omitempty" jsonschema:"campaign id or exact, case-sensitive name; give this, fqdns or both"`
+	FQDNs    []string `json:"fqdns,omitempty" jsonschema:"domain names, watched or not; at most 200 with the campaign's"`
+}
+
 type linkDomainInput struct {
 	FQDN                   string `json:"fqdn" jsonschema:"domain name, watched or not"`
 	Campaign               string `json:"campaign,omitempty" jsonschema:"campaign id or exact, case-sensitive name; give this or new_campaign_name"`
@@ -496,6 +516,11 @@ func (r *registry) domainEnrich(ctx context.Context, _ *mcp.CallToolRequest, in 
 
 func (r *registry) domainEnrichment(ctx context.Context, _ *mcp.CallToolRequest, in domainEnrichmentInput) (*mcp.CallToolResult, service.DomainEnrichmentResult, error) {
 	res, err := r.svc.DomainEnrichment(ctx, in.FQDN, in.IncludeGraph, in.IncludeCaptures)
+	return nil, res, err
+}
+
+func (r *registry) trackers(ctx context.Context, _ *mcp.CallToolRequest, in trackersInput) (*mcp.CallToolResult, service.TrackersResult, error) {
+	res, err := r.svc.Trackers(ctx, in.Campaign, in.FQDNs)
 	return nil, res, err
 }
 
